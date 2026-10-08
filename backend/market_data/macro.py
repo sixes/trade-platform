@@ -248,6 +248,18 @@ class MacroService:
                     points.append((live.as_of[:10], live.price))
                 series = [{"t": d, "v": v} for d, v in points]
             entry["series"] = series[-max(history_days, 2000):]
+            if derived_source:
+                component_limit = DAILY_RANGES["1m"] if intraday else DAILY_RANGES[range_key]
+                entry["chart_series"] = []
+                for component_key in (str(derived_source.get("left", "")).upper(), str(derived_source.get("right", "")).upper()):
+                    component_spec = specs_by_key.get(component_key, {})
+                    component = daily_for(component_key)[-component_limit:]
+                    entry["chart_series"].append({
+                        "key": component_key,
+                        "label": component_spec.get("label", component_key),
+                        "unit": component_spec.get("unit", "pct"),
+                        "series": [{"t": d, "v": v} for d, v in component],
+                    })
             entry["metrics"] = self._metrics(daily, live)
             if not daily and not (live and live.price is not None):
                 entry["error"] = "unavailable"

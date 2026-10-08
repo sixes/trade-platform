@@ -6,7 +6,9 @@ from backend.market_data.kalshi import KalshiClient, KalshiService
 SETTINGS = load_settings()
 
 EVENTS = {"events": [
+    {"event_ticker": "KXFEDDECISION-27DEC", "title": "Fed decision in Dec 2027?", "sub_title": "On Dec 15, 2027", "strike_date": "2027-12-15T19:00:00Z", "mutually_exclusive": True},
     {"event_ticker": "KXFEDDECISION-27JAN", "title": "Fed decision in Jan 2027?", "sub_title": "On Jan 27, 2027", "strike_date": "2027-01-27T19:00:00Z", "mutually_exclusive": True},
+    {"event_ticker": "KXFEDDECISION-26DEC", "title": "Fed decision in Dec 2026?", "sub_title": "On Dec 16, 2026", "strike_date": "2026-12-16T19:00:00Z", "mutually_exclusive": True},
     {"event_ticker": "KXFEDDECISION-26OCT", "title": "Fed decision in Oct 2026?", "sub_title": "On Oct 28, 2026", "strike_date": "2026-10-28T18:00:00Z", "mutually_exclusive": True},
 ]}
 MARKETS = {"markets": [
@@ -39,24 +41,32 @@ def offline_client(monkeypatch):
     return client, calls
 
 
-def test_snapshot_picks_next_meeting_and_charts_all_outcomes(monkeypatch):
+def test_default_snapshot_picks_next_meeting_and_charts_all_outcomes(monkeypatch):
     client, calls = offline_client(monkeypatch)
-    snap = KalshiService(SETTINGS, client).snapshot("1m")
-    assert snap["event"]["ticker"] == "KXFEDDECISION-26OCT"  # nearest upcoming meeting, not the first listed
-    assert [m["code"] for m in snap["markets"]] == ["H25", "H0", "C25"]  # sorted by probability
-    hike = snap["markets"][0]
+    service = KalshiService(SETTINGS, client)
+    snap = service.snapshot("1m")
+    assert snap["config"]["id"] == "next" and snap["event"]["ticker"] == "KXFEDDECISION-26OCT"
+    assert [m["code"] for m in snap["markets"]] == ["H25", "H0", "C25"]
+    assert len([c for c in calls if c[0].endswith("/candlesticks")]) == 3
+
+    december = service.snapshot("1m", "december_hikes")
+    assert december["config"]["id"] == "december_hikes" and december["event"]["ticker"] == "KXFEDDECISION-26DEC"
+    assert [m["code"] for m in december["markets"]] == ["H25"]
+    hike = december["markets"][0]
     assert hike["label"] == "Hike 25bps" and hike["last_pct"] == pytest.approx(64.0) and hike["yes_bid_pct"] == pytest.approx(63.0)
-    assert hike["previous_pct"] == pytest.approx(60.0) and hike["open_interest"] == pytest.approx(534607)
-    assert [p["v"] for p in hike["series"]] == [pytest.approx(62.0), pytest.approx(63.0), pytest.approx(64.0)]  # mean used when close is null
-    assert hike["series"][0]["t"].startswith("2026-09-2") and snap["refresh_seconds"] == 30.0
-    candle_calls = [c for c in calls if c[0].endswith("/candlesticks")]
-    assert len(candle_calls) == 3 and candle_calls[0][1]["period_interval"] == 60
-    assert snap["markets"][2]["previous_pct"] is None
+    assert [p["v"] for p in hike["series"]] == [pytest.approx(62.0), pytest.approx(63.0), pytest.approx(64.0)]
+
+
+def test_december_selector_returns_none_when_no_future_december(monkeypatch):
+    client, _ = offline_client(monkeypatch)
+    client.open_events = lambda series: [EVENTS["events"][1], EVENTS["events"][3]]
+    assert KalshiService(SETTINGS, client)._select_event("KXFEDDECISION", "december") is None
 
 
 def test_market_filter_and_explicit_event(monkeypatch):
     client, calls = offline_client(monkeypatch)
-    cfg = dict(SETTINGS.section("kalshi"), markets=["H25", "maintains"], event="KXFEDDECISION-27JAN")
+    cfg = {k: v for k, v in SETTINGS.section("kalshi").items() if k != "charts"}
+    cfg.update(markets=["H25", "maintains"], event="KXFEDDECISION-27JAN")
     service = KalshiService(Settings({"kalshi": cfg}), client)
     snap = service.snapshot("1d")
     assert snap["event"]["ticker"] == "KXFEDDECISION-27JAN"

@@ -57,6 +57,7 @@ def test_scan_rejects_unknown_scenario_and_too_many_symbols():
 def test_index_page_served():
     resp = client.get("/")
     assert resp.status_code == 200 and "Put Screener" in resp.text and "Watchlist IV Rank" in resp.text
+    assert 'id="card-kalshi"' in resp.text and 'id="card-kalshi-december_hikes"' in resp.text
 
 
 def test_watchlist_endpoint_lists_default_tickers_without_suffix():
@@ -77,9 +78,13 @@ def test_macro_endpoint_rejects_unknown_range_and_section():
     assert client.get("/api/macro?range=2w").status_code == 400
     assert client.get("/api/macro?range=1d&section=nope").status_code == 404
     config = client.get("/api/config").json()
-    assert [s["id"] for s in config["live_sections"]] == ["vix", "stocks", "macro", "japan_fx", "us_jp_gaps", "commodities"]
-    assert config["kalshi"]["enabled"] is True and config["kalshi"]["series_ticker"] == "KXFEDDECISION"
+    assert [s["id"] for s in config["live_sections"]] == ["vix", "stocks", "macro", "japan_yields", "japan_fx", "us_jp_gaps", "commodities"]
+    assert config["kalshi"]["enabled"] is True and config["kalshi"]["event"] == "next" and config["kalshi"]["markets"] == []
+    assert [chart["id"] for chart in config["kalshi_charts"]] == ["next", "december_hikes"]
+    december = config["kalshi_charts"][1]
+    assert december["event"] == "december" and december["markets"] == ["HIKE"]
     assert client.get("/api/kalshi?range=2w").status_code == 400
+    assert client.get("/api/kalshi?chart=nope").status_code == 404
     assert config["live_default_range"] in ("1d", "5d", "1m", "3m", "6m", "1y", "5y")
 
 

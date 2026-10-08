@@ -114,13 +114,19 @@ macro:
   max_symbols_per_section: 12   # cap on user-added tickers in a `symbols` section (2 Longbridge calls each per refresh)
 
 kalshi:
-  # Prediction-market odds for the next Fed decision (public Kalshi API, no key needed).
   enabled: true
-  title: Fed decision odds (Kalshi)
-  series_ticker: KXFEDDECISION   # cut / hold / hike outcomes per FOMC meeting (KXFED = rate-level ranges)
-  event: next                    # "next" = nearest open meeting, or an explicit event ticker such as KXFEDDECISION-26DEC
-  markets: []                    # outcome codes or label fragments to chart (e.g. [H25, H0, C25]); empty = all outcomes
   refresh_seconds: 30
+  charts:
+    - id: next
+      title: Fed decision odds (Kalshi)
+      series_ticker: KXFEDDECISION
+      event: next
+      markets: []
+    - id: december_hikes
+      title: December Fed hike odds (Kalshi)
+      series_ticker: KXFEDDECISION
+      event: december
+      markets: [hike]
 
 # Live chart sections (3 charts per row, timeframe buttons, minute-by-minute refresh, crosshair).
 # Per series: `sources` = daily history, `live` = intraday bars + last price; both are tried in order and the
@@ -173,6 +179,21 @@ live_sections:
         note: "30-day implied volatility of TLT options - the long-end analogue of the VIX; MOVE (Vol complex) covers the whole curve."
         sources: [{type: cboe, name: VXTLT}]
         live: [{type: yahoo, symbol: "^VXTLT"}]
+      - key: HYG
+        label: iShares iBoxx $ High Yield Corporate Bond ETF
+        unit: usd
+        sources: [{type: longbridge, symbol: HYG.US}, {type: yahoo, symbol: HYG}]
+        live: [{type: longbridge, symbol: HYG.US}, {type: yahoo, symbol: HYG}]
+      - key: DXY
+        label: ICE US Dollar Index
+        unit: index
+        sources:
+          - {type: yahoo, symbol: DX-Y.NYB, label: "ICE DXY via Yahoo"}
+          - {type: fred, id: DTWEXBGS, label: "Fed broad dollar index (fallback, different scale)"}
+        live: [{type: yahoo, symbol: DX-Y.NYB}]
+  - id: japan_yields
+    title: Japan Government Bond Yields
+    series:
       - key: JP2Y
         label: Japan 2-year government bond (JGB) yield
         unit: pct
@@ -193,18 +214,6 @@ live_sections:
         unit: pct
         note: "Japan MOF par yield curve, published once a day after the Tokyo close (no intraday data)."
         sources: [{type: mof_jgb, tenor: 30Y, label: "Japan MOF"}]
-      - key: HYG
-        label: iShares iBoxx $ High Yield Corporate Bond ETF
-        unit: usd
-        sources: [{type: longbridge, symbol: HYG.US}, {type: yahoo, symbol: HYG}]
-        live: [{type: longbridge, symbol: HYG.US}, {type: yahoo, symbol: HYG}]
-      - key: DXY
-        label: ICE US Dollar Index
-        unit: index
-        sources:
-          - {type: yahoo, symbol: DX-Y.NYB, label: "ICE DXY via Yahoo"}
-          - {type: fred, id: DTWEXBGS, label: "Fed broad dollar index (fallback, different scale)"}
-        live: [{type: yahoo, symbol: DX-Y.NYB}]
   - id: japan_fx
     title: Japan FX & Volatility
     series:

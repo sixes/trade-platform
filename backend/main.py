@@ -47,7 +47,7 @@ async def lifespan(_: FastAPI):
         (lambda sid=section["id"]: macro.snapshot("1y", sid)) for section in macro.sections()
     ]
     if kalshi.enabled:
-        builders.append(lambda: kalshi.snapshot("1m"))
+        builders.extend((lambda chart_id=cfg["id"]: kalshi.snapshot("1m", chart_id)) for cfg in kalshi.configs())
     warmer = CacheWarmer(builders, cache_ttl)
     warmer.start()
     if settings.longbridge_credentials_present:
@@ -197,13 +197,15 @@ def api_macro(range: str = "1d", section: str = "macro", variants: Optional[str]
 
 
 @app.get("/api/kalshi")
-def api_kalshi(range: str = "1m"):
+def api_kalshi(range: str = "1m", chart: Optional[str] = None):
     if not kalshi.enabled:
         raise HTTPException(status_code=404, detail="Kalshi section disabled in config.yaml")
     if range not in KALSHI_RANGES:
         raise HTTPException(status_code=400, detail=f"range must be one of {', '.join(KALSHI_RANGES)}")
     try:
-        return kalshi.snapshot(range)
+        return kalshi.snapshot(range, chart)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         log.exception("kalshi snapshot failed")
         raise HTTPException(status_code=503, detail=f"Kalshi data unavailable: {exc}")
@@ -303,6 +305,7 @@ def api_config():
         "live_default_range": settings.get("macro.default_range", "1d"),
         "live_max_symbols": MAX_CHART_SYMBOLS,
         "kalshi": dict(kalshi.config(), enabled=kalshi.enabled) if kalshi.enabled else {"enabled": False},
+        "kalshi_charts": [dict(cfg, enabled=kalshi.enabled) for cfg in kalshi.configs()] if kalshi.enabled else [],
         "scenarios": [
             {
                 "key": s.key,

@@ -186,7 +186,7 @@ def offline_macro(monkeypatch, live=None, sina=None):
 def test_live_sections_are_declared_and_commodities_snapshot_works(monkeypatch):
     service = offline_macro(monkeypatch)
     sections = service.sections()
-    assert [s["id"] for s in sections] == ["vix", "stocks", "macro", "japan_fx", "us_jp_gaps", "commodities"]
+    assert [s["id"] for s in sections] == ["vix", "stocks", "macro", "japan_yields", "japan_fx", "us_jp_gaps", "commodities"]
     assert sections[0]["hidden"] is True and sections[2]["hidden"] is False
     assert sections[2]["curve"] is True and sections[3]["curve"] is False
     snap = service.snapshot("1d", "commodities")
@@ -292,13 +292,12 @@ def test_macro_snapshot_daily_ranges_and_curve_without_live_feeds(monkeypatch):
     service = offline_macro(monkeypatch)
     snap = service.snapshot("3m")
     items = snap["items"]
-    assert list(items) == ["US2Y", "US5Y", "US10Y", "US30Y", "VXTLT", "JP2Y", "JP5Y", "JP10Y", "JP30Y", "HYG", "DXY"]
+    assert list(items) == ["US2Y", "US5Y", "US10Y", "US30Y", "VXTLT", "HYG", "DXY"]
     assert items["US2Y"]["unit"] == "pct" and items["US2Y"]["metrics"]["value"] == pytest.approx(4.71)
     assert items["US2Y"]["live_note"].startswith("daily data only")
     assert items["US10Y"]["metrics"]["live"] is False and items["US10Y"]["live_note"] == "no live feed reachable"
     assert items["HYG"]["daily_source"] == "stub:HYG"
     assert items["VXTLT"]["unit"] == "index" and items["VXTLT"]["metrics"]["value"] == pytest.approx(16.7) and "TLT" in items["VXTLT"]["note"]
-    assert items["JP30Y"]["unit"] == "pct" and items["JP30Y"]["daily_source"] == "stub:JP30Y" and items["JP30Y"]["live_note"].startswith("daily data only")
     assert len(items["US10Y"]["series"]) == 22 and items["US10Y"]["series"][-1]["t"] == "2026-09-22"
     assert snap["curve"]["2s10s"]["bp"] == pytest.approx(25.0) and snap["curve"]["2s10s"]["state"] == "normal"
     assert snap["range"] == "3m" and "1d" in snap["ranges"]
@@ -311,6 +310,10 @@ def test_macro_snapshot_daily_ranges_and_curve_without_live_feeds(monkeypatch):
 
 def test_japan_fx_and_us_japan_gap_sections(monkeypatch):
     service = offline_macro(monkeypatch)
+
+    yields = service.snapshot("3m", "japan_yields")
+    assert list(yields["items"]) == ["JP2Y", "JP5Y", "JP10Y", "JP30Y"]
+    assert all(item["unit"] == "pct" and item["live_note"].startswith("daily data only") for item in yields["items"].values())
 
     japan = service.snapshot("3m", "japan_fx")
     assert list(japan["items"]) == ["USDJPY", "JYVIX_PROXY", "JPVL_PROXY", "G5_COLV_PROXY"]
@@ -326,6 +329,11 @@ def test_japan_fx_and_us_japan_gap_sections(monkeypatch):
     assert gaps["items"]["USJP2Y"]["unit"] == "bp"
     assert gaps["items"]["USJP2Y"]["metrics"]["value"] == pytest.approx((4.71 - 1.02) * 100)
     assert gaps["items"]["USJP10Y"]["daily_source"] == "US10Y minus JP10Y"
+    for tenor in ("2", "5", "10", "30"):
+        components = gaps["items"][f"USJP{tenor}Y"]["chart_series"]
+        assert [component["key"] for component in components] == [f"US{tenor}Y", f"JP{tenor}Y"]
+        assert all(component["unit"] == "pct" and len(component["series"]) == 22 for component in components)
+    assert "chart_series" not in japan["items"]["USDJPY"]
     assert all(item["live_note"].startswith("daily data only") for item in gaps["items"].values())
 
 
@@ -347,6 +355,15 @@ def test_derived_gap_uses_only_shared_dates(monkeypatch):
         {"t": "2026-09-03", "v": pytest.approx(310.0)},
     ]
     assert entry["metrics"]["as_of"] == "2026-09-03"
+    assert entry["chart_series"][0]["series"] == [
+        {"t": "2026-09-01", "v": 4.0},
+        {"t": "2026-09-02", "v": 4.1},
+        {"t": "2026-09-03", "v": 4.2},
+    ]
+    assert entry["chart_series"][1]["series"] == [
+        {"t": "2026-09-01", "v": 1.0},
+        {"t": "2026-09-03", "v": 1.1},
+    ]
 
 
 def test_macro_snapshot_uses_live_bars_and_appends_live_point(monkeypatch):

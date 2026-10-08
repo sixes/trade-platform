@@ -100,18 +100,37 @@ class KalshiService:
     def enabled(self) -> bool:
         return bool(self.settings.get("kalshi.enabled", True))
 
-    def config(self) -> dict:
-        cfg = self.settings.section("kalshi")
-        return {
-            "series_ticker": str(cfg.get("series_ticker", "KXFEDDECISION")),
-            "event": str(cfg.get("event", "next")),
-            "markets": [str(m).upper() for m in (cfg.get("markets") or [])],
-            "refresh_seconds": float(cfg.get("refresh_seconds", 30)),
-            "title": str(cfg.get("title", "Fed decision (Kalshi)")),
-        }
+    def configs(self) -> List[dict]:
+        root = self.settings.section("kalshi")
+        charts = root.get("charts")
+        if not isinstance(charts, list):
+            charts = [dict(root, id="next")]
+        out = []
+        for chart in charts:
+            if not chart.get("id"):
+                continue
+            out.append({
+                "id": str(chart["id"]),
+                "series_ticker": str(chart.get("series_ticker", root.get("series_ticker", "KXFEDDECISION"))),
+                "event": str(chart.get("event", root.get("event", "next"))),
+                "markets": [str(m).upper() for m in (chart.get("markets", root.get("markets")) or [])],
+                "refresh_seconds": float(chart.get("refresh_seconds", root.get("refresh_seconds", 30))),
+                "title": str(chart.get("title", root.get("title", "Fed decision (Kalshi)"))),
+            })
+        return out
 
-    def snapshot(self, range_key: str = "1m") -> dict:
-        cfg = self.config()
+    def config(self, chart_id: Optional[str] = None) -> dict:
+        wanted = chart_id or "next"
+        configs = self.configs()
+        config = next((cfg for cfg in configs if cfg["id"] == wanted), None)
+        if config is None and chart_id is None and configs:
+            config = configs[0]
+        if config is None:
+            raise KeyError(f"unknown Kalshi chart {wanted!r}")
+        return config
+
+    def snapshot(self, range_key: str = "1m", chart_id: Optional[str] = None) -> dict:
+        cfg = self.config(chart_id)
         range_key = range_key if range_key in RANGES else "1m"
         period, lookback = RANGES[range_key]
         series_ticker = cfg["series_ticker"]
@@ -169,11 +188,21 @@ class KalshiService:
         events = self.client.open_events(series_ticker)
         if not events:
             return None
+        now = datetime.now(timezone.utc)
+        if which and which.lower() == "december":
+            december = []
+            for event in events:
+                try:
+                    strike = datetime.fromisoformat(str(event.get("strike_date", "")).replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if strike >= now and strike.month == 12:
+                    december.append((strike, event))
+            return min(december, key=lambda item: item[0])[1] if december else None
         if which and which.lower() != "next":
             for event in events:
                 if str(event.get("event_ticker", "")).upper() == which.upper():
                     return event
             log.warning("Kalshi event %s not open; falling back to the next one", which)
-        now = datetime.now(timezone.utc).isoformat()
-        upcoming = [e for e in events if (e.get("strike_date") or "") >= now]
+        upcoming = [e for e in events if (e.get("strike_date") or "") >= now.isoformat()]
         return (upcoming or events)[0]

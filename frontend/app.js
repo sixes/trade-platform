@@ -299,7 +299,9 @@
         <span class="sub">pctl ${num(m.percentile, 0)}</span>
         <span class="sub" title="${esc(entry.daily_source || "")}">${esc(String(entry.live_source || entry.daily_source || "").split(":")[0])}</span>
         ${rangeNote}${note}`;
-      if (typeof Chart !== "undefined" && entry.series && entry.series.length) {
+      if (typeof Chart !== "undefined" && entry.chart_series && entry.chart_series.length) {
+        drawOverlayChart(`live:${sid}:${name}`, `#live-${sid}-chart-${id}`, entry.chart_series, entry.intraday ? data.range : "daily");
+      } else if (typeof Chart !== "undefined" && entry.series && entry.series.length) {
         drawSeriesChart(`live:${sid}:${name}`, `#live-${sid}-chart-${id}`, entry.series, LIVE_PALETTE[i % LIVE_PALETTE.length], entry.intraday ? data.range : "daily", unit, name);
       }
     });
@@ -379,6 +381,50 @@
       ctx.restore();
     },
   };
+
+  function drawOverlayChart(key, selector, chartSeries, range) {
+    const datasets = chartSeries.map((item, i) => ({
+      label: item.key,
+      data: item.series.map((p) => ({ x: Date.parse(p.t), y: p.v })),
+      borderColor: LIVE_PALETTE[i % LIVE_PALETTE.length],
+      backgroundColor: "transparent",
+      borderWidth: 1.7,
+      pointRadius: 0,
+      pointHitRadius: 10,
+      tension: 0.08,
+      spanGaps: true,
+    }));
+    const existing = state.charts[key];
+    if (existing) {
+      existing.data.datasets = datasets;
+      existing.options.scales.x.ticks.callback = (v) => timeLabel(new Date(v).toISOString(), range);
+      existing.update("none");
+      return;
+    }
+    const canvas = $(selector);
+    if (!canvas) return;
+    state.charts[key] = new Chart(canvas, {
+      type: "line",
+      data: { datasets },
+      options: {
+        animation: false, responsive: true, maintainAspectRatio: false, parsing: false,
+        interaction: { mode: "nearest", axis: "x", intersect: false },
+        plugins: {
+          legend: { display: true, labels: { color: "#e6edf3", boxWidth: 10, font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              title: (items) => (items[0] ? new Date(items[0].parsed.x).toISOString().slice(0, 10) : ""),
+              label: (ctx) => `${ctx.dataset.label}: ${fmtPrecise(ctx.parsed.y, "pct")}`,
+            },
+          },
+        },
+        scales: {
+          x: { type: "linear", ticks: { color: "#8b98a8", maxTicksLimit: 6, maxRotation: 0, font: { size: 10 }, callback: (v) => timeLabel(new Date(v).toISOString(), range) }, grid: { color: "#1f2a37" } },
+          y: { ticks: { color: "#8b98a8", maxTicksLimit: 5, font: { size: 10 }, callback: (v) => `${num(v, 2)}%` }, grid: { color: "#1f2a37" } },
+        },
+      },
+    });
+  }
 
   // Line chart for a series of {t, v} points; updates in place so live refreshes do not flicker.
   function drawSeriesChart(key, selector, series, color, range, unit, name, thresholds) {
@@ -1049,45 +1095,59 @@
   }
 
   // ------------------------------------------------------------------ Kalshi: next Fed decision odds
-  const KALSHI_RANGE_KEY = "trade-plat.kalshiRange";
-  const kalshiState = { enabled: false, range: null, timer: null, data: null, inflight: false };
+  const kalshiStates = new Map();
   const KALSHI_COLORS = ["#4ade80", "#f87171", "#60a5fa", "#fbbf24", "#a78bfa", "#f472b6", "#2dd4bf", "#fb923c"];
 
-  function initKalshi(cfg) {
-    const card = $("#card-kalshi");
-    kalshiState.enabled = !!(cfg && cfg.enabled !== false);
-    if (!kalshiState.enabled) { card.classList.add("hidden"); return; }
-    if (cfg.title) $("#kalshi-title").textContent = cfg.title;
-    try { kalshiState.range = localStorage.getItem(KALSHI_RANGE_KEY) || "1m"; } catch (e) { kalshiState.range = "1m"; }
-    card.querySelectorAll("#kalshi-ranges button").forEach((btn) => btn.addEventListener("click", () => {
-      kalshiState.range = btn.dataset.range;
-      try { localStorage.setItem(KALSHI_RANGE_KEY, kalshiState.range); } catch (e) { /* ignore */ }
-      loadKalshi();
-    }));
+  function kalshiSelector(ctl, suffix) {
+    return ctl.id === "next" ? `#kalshi-${suffix}` : `#kalshi-${ctl.id}-${suffix}`;
   }
 
-  async function loadKalshi() {
-    if (!kalshiState.enabled || kalshiState.inflight) return;
-    kalshiState.inflight = true;
-    document.querySelectorAll("#kalshi-ranges button").forEach((b) => b.classList.toggle("active", b.dataset.range === kalshiState.range));
+  function initKalshi(configs) {
+    (configs || []).forEach((cfg) => {
+      const id = cfg.id || "next";
+      const ctl = {
+        id, enabled: cfg.enabled !== false, range: null, timer: null, data: null, inflight: false,
+        card: $(id === "next" ? "#card-kalshi" : `#card-kalshi-${id}`),
+        storageKey: `trade-plat.kalshiRange.${id}`,
+      };
+      if (!ctl.card) return;
+      if (!ctl.enabled) { ctl.card.classList.add("hidden"); return; }
+      $(kalshiSelector(ctl, "title")).textContent = cfg.title;
+      try {
+        const legacy = id === "next" ? localStorage.getItem("trade-plat.kalshiRange") : null;
+        ctl.range = localStorage.getItem(ctl.storageKey) || legacy || "1m";
+      } catch (e) { ctl.range = "1m"; }
+      ctl.card.querySelectorAll(".range-buttons button").forEach((btn) => btn.addEventListener("click", () => {
+        ctl.range = btn.dataset.range;
+        try { localStorage.setItem(ctl.storageKey, ctl.range); } catch (e) { /* ignore */ }
+        loadKalshi(ctl);
+      }));
+      kalshiStates.set(id, ctl);
+    });
+  }
+
+  async function loadKalshi(ctl) {
+    if (!ctl.enabled || ctl.inflight) return;
+    ctl.inflight = true;
+    ctl.card.querySelectorAll(".range-buttons button").forEach((b) => b.classList.toggle("active", b.dataset.range === ctl.range));
     try {
-      const data = await api(`/api/kalshi?range=${encodeURIComponent(kalshiState.range)}`);
-      kalshiState.data = data;
-      renderKalshi(data);
-      scheduleKalshiRefresh((data.refresh_seconds || 30) * 1000);
+      const chartParam = ctl.id === "next" ? "" : `&chart=${encodeURIComponent(ctl.id)}`;
+      const data = await api(`/api/kalshi?range=${encodeURIComponent(ctl.range)}${chartParam}`);
+      ctl.data = data;
+      renderKalshi(ctl, data);
+      scheduleKalshiRefresh(ctl, (data.refresh_seconds || 30) * 1000);
     } catch (err) {
-      $("#kalshi-live").textContent = `update failed: ${err.message}`;
-      scheduleKalshiRefresh(60000);
+      $(kalshiSelector(ctl, "live")).textContent = `update failed: ${err.message}`;
+      scheduleKalshiRefresh(ctl, 60000);
     } finally {
-      kalshiState.inflight = false;
+      ctl.inflight = false;
     }
   }
 
-  function scheduleKalshiRefresh(ms) {
-    clearTimeout(kalshiState.timer);
-    kalshiState.timer = setTimeout(() => {
-      const folded = $("#card-kalshi").classList.contains("collapsed");
-      if (document.visibilityState === "visible" && !folded) loadKalshi(); else scheduleKalshiRefresh(15000);
+  function scheduleKalshiRefresh(ctl, ms) {
+    clearTimeout(ctl.timer);
+    ctl.timer = setTimeout(() => {
+      if (document.visibilityState === "visible" && !ctl.card.classList.contains("collapsed")) loadKalshi(ctl); else scheduleKalshiRefresh(ctl, 15000);
     }, ms);
   }
 
@@ -1098,18 +1158,18 @@
     return range === "1d" ? hm : range === "5d" ? `${md} ${hm}` : md;
   };
 
-  function renderKalshi(data) {
+  function renderKalshi(ctl, data) {
     const event = data.event;
     if (!event) {
-      $("#kalshi-event").textContent = data.error || "no open market";
-      $("#kalshi-table").innerHTML = "";
+      $(kalshiSelector(ctl, "event")).textContent = data.error || "no open market";
+      $(kalshiSelector(ctl, "table")).innerHTML = "";
       return;
     }
     const when = event.strike_date ? new Date(event.strike_date) : null;
     const days = when ? Math.max(0, Math.round((when - Date.now()) / 86400000)) : null;
-    $("#kalshi-event").textContent = `${event.title} · ${event.sub_title || ""}${days != null ? ` · in ${days} days` : ""} · ${event.ticker}`;
+    $(kalshiSelector(ctl, "event")).textContent = `${event.title} · ${event.sub_title || ""}${days != null ? ` · in ${days} days` : ""} · ${event.ticker}`;
     const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    $("#kalshi-live").innerHTML = `<span class="live-badge"><span class="dot"></span>LIVE</span> refreshed ${esc(stamp)} · every ${Math.round(data.refresh_seconds || 30)}s`;
+    $(kalshiSelector(ctl, "live")).innerHTML = `<span class="live-badge"><span class="dot"></span>LIVE</span> refreshed ${esc(stamp)} · every ${Math.round(data.refresh_seconds || 30)}s`;
 
     const markets = data.markets || [];
     const rows = markets.map((m, i) => `
@@ -1121,13 +1181,13 @@
         <td>${m.volume_24h != null ? num(m.volume_24h, 0) : "-"}</td>
         <td>${m.open_interest != null ? num(m.open_interest, 0) : "-"}</td>
       </tr>`).join("");
-    $("#kalshi-table").innerHTML = `
+    $(kalshiSelector(ctl, "table")).innerHTML = `
       <table class="kalshi-table">
         <thead><tr><th>Outcome</th><th>Yes</th><th>Bid / ask</th><th>Chg</th><th>Vol 24h</th><th>Open int.</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
-    $("#kalshi-note").textContent = `Prices are Kalshi yes-contract prices in cents = implied probability. Configure which outcomes to chart in config.yaml (kalshi.markets); ${data.config && data.config.markets && data.config.markets.length ? `showing ${data.config.markets.join(", ")}` : "showing all outcomes"}.`;
-    setSummary("card-kalshi", markets.slice(0, 3).map((m) => `${m.label} ${num(m.last_pct, 0)}%`).join(" · "));
+    $(kalshiSelector(ctl, "note")).textContent = `Prices are Kalshi yes-contract prices in cents = implied probability; ${data.config && data.config.markets && data.config.markets.length ? `showing ${data.config.markets.join(", ")}` : "showing all outcomes"}.`;
+    setSummary(ctl.card.id, markets.slice(0, 3).map((m) => `${m.label} ${num(m.last_pct, 0)}%`).join(" · "));
 
     if (typeof Chart === "undefined") return;
     const datasets = markets.map((m, i) => ({
@@ -1138,7 +1198,8 @@
       borderWidth: 1.6, pointRadius: 0, pointHitRadius: 8, tension: 0.05, spanGaps: true, stepped: false,
     }));
     const range = data.range;
-    const existing = state.charts.kalshi;
+    const chartKey = `kalshi:${ctl.id}`;
+    const existing = state.charts[chartKey];
     if (existing) {
       existing.data.datasets.forEach((ds, i) => { if (datasets[i]) { ds.data = datasets[i].data; ds.label = datasets[i].label; } });
       while (existing.data.datasets.length > datasets.length) existing.data.datasets.pop();
@@ -1147,7 +1208,7 @@
       existing.update("none");
       return;
     }
-    state.charts.kalshi = new Chart($("#kalshi-chart"), {
+    state.charts[chartKey] = new Chart($(kalshiSelector(ctl, "chart")), {
       type: "line",
       data: { datasets },
       options: {
@@ -1166,7 +1227,7 @@
   }
 
   // ------------------------------------------------------------------ section navigation
-  const NAV_LABELS = { "card-vix": "VIX", "card-skew": "SKEW", "card-fg": "Fear & Greed", "card-volcomplex": "Vol complex", "card-stocks": "Stocks", "card-macro": "Rates", "card-commodities": "Commodities", "card-kalshi": "Fed odds", "regime-card": "Regime", "watchlist-card": "Watchlist", "card-screener": "Screener" };
+  const NAV_LABELS = { "card-vix": "VIX", "card-skew": "SKEW", "card-fg": "Fear & Greed", "card-volcomplex": "Vol complex", "card-stocks": "Stocks", "card-macro": "Rates", "card-commodities": "Commodities", "card-kalshi": "Fed odds", "card-kalshi-december_hikes": "December hikes", "regime-card": "Regime", "watchlist-card": "Watchlist", "card-screener": "Screener" };
 
   function initNav() {
     const nav = $("#section-nav");
@@ -1206,11 +1267,11 @@
       $("#scan-hint").innerHTML = `<span class="error-text">${esc(err.message)}</span>`;
     }
     initFolding();
-    initKalshi(state.config && state.config.kalshi);
+    initKalshi(state.config && state.config.kalshi_charts);
     initNav();
     await loadMarket();
     await Promise.all([...liveSections.values()].map(loadLiveSection));
-    if (kalshiState.enabled) loadKalshi();
+    kalshiStates.forEach(loadKalshi);
     await loadRecommendations();
     await loadWatchlist();
     pollStatus();
