@@ -173,6 +173,21 @@ live_sections:
         note: "30-day implied volatility of TLT options - the long-end analogue of the VIX; MOVE (Vol complex) covers the whole curve."
         sources: [{type: cboe, name: VXTLT}]
         live: [{type: yahoo, symbol: "^VXTLT"}]
+      - key: JP2Y
+        label: Japan 2-year government bond (JGB) yield
+        unit: pct
+        note: "Japan MOF par yield curve, published once a day after the Tokyo close (no intraday data)."
+        sources: [{type: mof_jgb, tenor: 2Y, label: "Japan MOF"}]
+      - key: JP5Y
+        label: Japan 5-year government bond (JGB) yield
+        unit: pct
+        note: "Japan MOF par yield curve, published once a day after the Tokyo close (no intraday data)."
+        sources: [{type: mof_jgb, tenor: 5Y, label: "Japan MOF"}]
+      - key: JP10Y
+        label: Japan 10-year government bond (JGB) yield
+        unit: pct
+        note: "Japan MOF par yield curve, published once a day after the Tokyo close (no intraday data)."
+        sources: [{type: mof_jgb, tenor: 10Y, label: "Japan MOF"}]
       - key: JP30Y
         label: Japan 30-year government bond (JGB) yield
         unit: pct
@@ -190,6 +205,51 @@ live_sections:
           - {type: yahoo, symbol: DX-Y.NYB, label: "ICE DXY via Yahoo"}
           - {type: fred, id: DTWEXBGS, label: "Fed broad dollar index (fallback, different scale)"}
         live: [{type: yahoo, symbol: DX-Y.NYB}]
+  - id: japan_fx
+    title: Japan FX & Volatility
+    series:
+      - key: USDJPY
+        label: USD/JPY (yen per US dollar)
+        unit: fx
+        sources: [{type: yahoo, symbol: "JPY=X", label: "Yahoo USD/JPY"}]
+        live: [{type: yahoo, symbol: "JPY=X"}]
+      - key: JYVIX_PROXY
+        label: JYVIX Proxy - Nikkei 225 Volatility Index
+        unit: vol
+        note: "Public Japan-volatility proxy (^NKVI.OS), not the Cboe/CME FX Yen Volatility Index."
+        sources: [{type: yahoo, symbol: "^NKVI.OS", label: "Yahoo Nikkei 225 VI proxy"}]
+        live: [{type: yahoo, symbol: "^NKVI.OS"}]
+      - key: JPVL_PROXY
+        label: JPVL Proxy - Japan High Dividend 70 ETF
+        unit: jpy
+        note: "Public Japan value/income proxy (1577.T), not the proprietary JPVL index."
+        sources: [{type: yahoo, symbol: "1577.T", label: "Yahoo 1577.T value proxy"}]
+        live: [{type: yahoo, symbol: "1577.T"}]
+      - key: G5_COLV_PROXY
+        label: G5 COLV Proxy - global currency volatility ETF
+        unit: usd
+        note: "Public tradable proxy (CEW), not the proprietary G5 COLV index."
+        sources: [{type: yahoo, symbol: CEW, label: "Yahoo CEW proxy"}]
+        live: [{type: yahoo, symbol: CEW}]
+  - id: us_jp_gaps
+    title: US - Japan Government Yield Gaps
+    series:
+      - key: USJP2Y
+        label: US - Japan 2-year yield gap
+        unit: bp
+        sources: [{type: derived_spread, left: US2Y, right: JP2Y, scale: 100, label: "US2Y minus JP2Y"}]
+      - key: USJP5Y
+        label: US - Japan 5-year yield gap
+        unit: bp
+        sources: [{type: derived_spread, left: US5Y, right: JP5Y, scale: 100, label: "US5Y minus JP5Y"}]
+      - key: USJP10Y
+        label: US - Japan 10-year yield gap
+        unit: bp
+        sources: [{type: derived_spread, left: US10Y, right: JP10Y, scale: 100, label: "US10Y minus JP10Y"}]
+      - key: USJP30Y
+        label: US - Japan 30-year yield gap
+        unit: bp
+        sources: [{type: derived_spread, left: US30Y, right: JP30Y, scale: 100, label: "US30Y minus JP30Y"}]
   - id: commodities
     title: Commodities
     refresh_seconds: 5     # Sina quotes are polled every 5 s; Yahoo/EIA-backed cards keep their own caching

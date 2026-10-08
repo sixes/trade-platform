@@ -77,7 +77,7 @@ def test_macro_endpoint_rejects_unknown_range_and_section():
     assert client.get("/api/macro?range=2w").status_code == 400
     assert client.get("/api/macro?range=1d&section=nope").status_code == 404
     config = client.get("/api/config").json()
-    assert [s["id"] for s in config["live_sections"]] == ["vix", "stocks", "macro", "commodities"]
+    assert [s["id"] for s in config["live_sections"]] == ["vix", "stocks", "macro", "japan_fx", "us_jp_gaps", "commodities"]
     assert config["kalshi"]["enabled"] is True and config["kalshi"]["series_ticker"] == "KXFEDDECISION"
     assert client.get("/api/kalshi?range=2w").status_code == 400
     assert config["live_default_range"] in ("1d", "5d", "1m", "3m", "6m", "1y", "5y")

@@ -116,7 +116,9 @@ class StubProvider:
     def freshness(self): return {}
 
     def try_series(self, key, sources, fetch=None):
-        curve = {"US2Y": 4.71, "US5Y": 4.83, "US10Y": 4.96, "US30Y": 5.29, "VXTLT": 16.7, "JP30Y": 4.12, "HYG": 78.1, "DXY": 101.1,
+        curve = {"US2Y": 4.71, "US5Y": 4.83, "US10Y": 4.96, "US30Y": 5.29, "VXTLT": 16.7,
+                 "JP2Y": 1.02, "JP5Y": 1.35, "JP10Y": 1.76, "JP30Y": 4.12, "HYG": 78.1, "DXY": 101.1,
+                 "USDJPY": 152.3, "JYVIX_PROXY": 28.7, "JPVL_PROXY": 24.2, "G5_COLV_PROXY": 17.4,
                  "GOLD_SPOT": 4320.0, "GOLD_FUTURES": 4322.0, "GOLD_ETF": 392.9, "SILVER_SPOT": 64.0, "SILVER_FUTURES": 64.6, "SILVER_ETF": 58.2,
                  "BRENT_SPOT": 114.9, "BRENT_FUTURES": 97.5, "WTI_SPOT": 96.4, "WTI_FUTURES": 91.6, "COPPER": 6.77,
                  "STOCKS_SOXL": 142.3, "STOCKS_TECL": 228.2, "STOCKS_UPRO": 148.8, "STOCKS_SPXL": 284.7, "STOCKS_NVDA": 190.5}
@@ -184,7 +186,7 @@ def offline_macro(monkeypatch, live=None, sina=None):
 def test_live_sections_are_declared_and_commodities_snapshot_works(monkeypatch):
     service = offline_macro(monkeypatch)
     sections = service.sections()
-    assert [s["id"] for s in sections] == ["vix", "stocks", "macro", "commodities"]
+    assert [s["id"] for s in sections] == ["vix", "stocks", "macro", "japan_fx", "us_jp_gaps", "commodities"]
     assert sections[0]["hidden"] is True and sections[2]["hidden"] is False
     assert sections[2]["curve"] is True and sections[3]["curve"] is False
     snap = service.snapshot("1d", "commodities")
@@ -290,7 +292,7 @@ def test_macro_snapshot_daily_ranges_and_curve_without_live_feeds(monkeypatch):
     service = offline_macro(monkeypatch)
     snap = service.snapshot("3m")
     items = snap["items"]
-    assert list(items) == ["US2Y", "US5Y", "US10Y", "US30Y", "VXTLT", "JP30Y", "HYG", "DXY"]
+    assert list(items) == ["US2Y", "US5Y", "US10Y", "US30Y", "VXTLT", "JP2Y", "JP5Y", "JP10Y", "JP30Y", "HYG", "DXY"]
     assert items["US2Y"]["unit"] == "pct" and items["US2Y"]["metrics"]["value"] == pytest.approx(4.71)
     assert items["US2Y"]["live_note"].startswith("daily data only")
     assert items["US10Y"]["metrics"]["live"] is False and items["US10Y"]["live_note"] == "no live feed reachable"
@@ -305,6 +307,46 @@ def test_macro_snapshot_daily_ranges_and_curve_without_live_feeds(monkeypatch):
     for key in ("US10Y", "DXY"):
         entry = intraday["items"][key]
         assert entry["intraday"] is False and entry["fallback"] == "daily" and len(entry["series"]) == 22
+
+
+def test_japan_fx_and_us_japan_gap_sections(monkeypatch):
+    service = offline_macro(monkeypatch)
+
+    japan = service.snapshot("3m", "japan_fx")
+    assert list(japan["items"]) == ["USDJPY", "JYVIX_PROXY", "JPVL_PROXY", "G5_COLV_PROXY"]
+    assert japan["items"]["USDJPY"]["unit"] == "fx"
+    assert japan["items"]["JYVIX_PROXY"]["daily_source"] == "stub:JYVIX_PROXY"
+    assert "not the Cboe/CME FX Yen" in japan["items"]["JYVIX_PROXY"]["note"]
+    assert japan["items"]["JPVL_PROXY"]["unit"] == "jpy"
+    assert "1577.T" in japan["items"]["JPVL_PROXY"]["note"] and "not the proprietary JPVL" in japan["items"]["JPVL_PROXY"]["note"]
+    assert "not the proprietary G5 COLV" in japan["items"]["G5_COLV_PROXY"]["note"]
+
+    gaps = service.snapshot("3m", "us_jp_gaps")
+    assert list(gaps["items"]) == ["USJP2Y", "USJP5Y", "USJP10Y", "USJP30Y"]
+    assert gaps["items"]["USJP2Y"]["unit"] == "bp"
+    assert gaps["items"]["USJP2Y"]["metrics"]["value"] == pytest.approx((4.71 - 1.02) * 100)
+    assert gaps["items"]["USJP10Y"]["daily_source"] == "US10Y minus JP10Y"
+    assert all(item["live_note"].startswith("daily data only") for item in gaps["items"].values())
+
+
+def test_derived_gap_uses_only_shared_dates(monkeypatch):
+    service = offline_macro(monkeypatch)
+    original = service.indices.try_series
+
+    def uneven(key, sources, fetch=None):
+        if key == "US2Y":
+            return [("2026-09-01", 4.0), ("2026-09-02", 4.1), ("2026-09-03", 4.2)]
+        if key == "JP2Y":
+            return [("2026-09-01", 1.0), ("2026-09-03", 1.1)]
+        return original(key, sources, fetch)
+
+    monkeypatch.setattr(service.indices, "try_series", uneven)
+    entry = service.snapshot("3m", "us_jp_gaps")["items"]["USJP2Y"]
+    assert entry["series"] == [
+        {"t": "2026-09-01", "v": pytest.approx(300.0)},
+        {"t": "2026-09-03", "v": pytest.approx(310.0)},
+    ]
+    assert entry["metrics"]["as_of"] == "2026-09-03"
 
 
 def test_macro_snapshot_uses_live_bars_and_appends_live_point(monkeypatch):

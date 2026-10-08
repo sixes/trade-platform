@@ -54,15 +54,16 @@
   }
 
   // Unit-aware formatting for the mini cards: yields in % with bp changes, ETF prices in $, indices plain.
-  const fmtValue = (v, unit) => (v == null ? "-" : unit === "pct" ? `${num(v, 2)}%` : unit === "usd" ? `$${num(v, 2)}` : num(v, 2));
-  const fmtPrecise = (v, unit) => (v == null ? "-" : unit === "pct" ? `${num(v, 3)}%` : unit === "usd" ? `$${num(v, 2)}` : unit === "vol" ? num(v, 2) : num(v, 3));
+  const fmtValue = (v, unit) => (v == null ? "-" : unit === "pct" ? `${num(v, 2)}%` : unit === "bp" ? `${num(v, 0)} bp` : unit === "usd" ? `$${num(v, 2)}` : unit === "jpy" ? `¥${num(v, 0)}` : num(v, unit === "fx" ? 3 : 2));
+  const fmtPrecise = (v, unit) => (v == null ? "-" : unit === "pct" ? `${num(v, 3)}%` : unit === "bp" ? `${num(v, 1)} bp` : unit === "usd" ? `$${num(v, 2)}` : unit === "jpy" ? `¥${num(v, 1)}` : unit === "vol" ? num(v, 2) : num(v, 3));
   const fmtChange = (chg, unit, base) => {
     if (chg == null) return "-";
     if (unit === "pct") return `${signed(chg * 100, 0)} bp`;
-    if (unit === "usd") return `${signed(chg, 2)}${base ? ` (${signed((chg / (base - chg)) * 100, 2)}%)` : ""}`;
-    return signed(chg, 2);
+    if (unit === "bp") return `${signed(chg, 1)} bp`;
+    if (unit === "usd" || unit === "jpy") return `${signed(chg, unit === "jpy" ? 0 : 2)}${base ? ` (${signed((chg / (base - chg)) * 100, 2)}%)` : ""}`;
+    return signed(chg, unit === "fx" ? 3 : 2);
   };
-  const fmtRange = (lo, hi, unit) => (lo == null || hi == null ? "-" : unit === "pct" ? `${num(lo, 2)}-${num(hi, 2)}%` : `${num(lo, unit === "usd" ? 2 : 1)} - ${num(hi, unit === "usd" ? 2 : 1)}`);
+  const fmtRange = (lo, hi, unit) => (lo == null || hi == null ? "-" : unit === "pct" ? `${num(lo, 2)}-${num(hi, 2)}%` : unit === "bp" ? `${num(lo, 0)} - ${num(hi, 0)} bp` : unit === "jpy" ? `¥${num(lo, 0)} - ¥${num(hi, 0)}` : `${num(lo, unit === "usd" ? 2 : unit === "fx" ? 3 : 1)} - ${num(hi, unit === "usd" ? 2 : unit === "fx" ? 3 : 1)}`);
 
   function renderMiniRow(containerId, entries, defaultUnit) {
     const container = document.getElementById(containerId);

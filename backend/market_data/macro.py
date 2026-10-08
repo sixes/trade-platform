@@ -172,10 +172,51 @@ class MacroService:
 
         items: dict = {}
         latest: dict = {}
+        daily_by_key: Dict[str, List[Tuple[str, float]]] = {}
+        specs_by_key = {key: spec for key, _, _, spec in resolved}
+        for configured_section in self.sections():
+            for raw_spec in self.specs(configured_section["id"]):
+                candidate_key = str(raw_spec["key"]).upper()
+                if candidate_key not in specs_by_key:
+                    _, candidate = self._resolve_variant(raw_spec, None, available_types)
+                    specs_by_key[candidate_key] = candidate
+
+        def daily_for(key: str, trail: Optional[set] = None) -> List[Tuple[str, float]]:
+            if key in daily_by_key:
+                return daily_by_key[key]
+            trail = set(trail or ())
+            if key in trail:
+                log.warning("Derived series dependency cycle at %s", key)
+                return []
+            spec = specs_by_key.get(key)
+            if spec is None:
+                log.warning("Derived series dependency %s is not in this section", key)
+                return []
+            trail.add(key)
+            sources = spec.get("sources", [])
+            derived = next((src for src in sources if str(src.get("type", "")).lower() == "derived_spread"), None)
+            if derived:
+                left = daily_for(str(derived.get("left", "")).upper(), trail)
+                right = daily_for(str(derived.get("right", "")).upper(), trail)
+                right_by_date = dict(right)
+                scale = float(derived.get("scale", 1.0))
+                daily = [(day, (value - right_by_date[day]) * scale) for day, value in left if day in right_by_date]
+            else:
+                cache_key = prefix + key if key in {item_key for item_key, _, _, _ in resolved} else key
+                variant = next((name for item_key, _, name, _ in resolved if item_key == key), None)
+                if variant:
+                    cache_key = prefix + f"{key}_{variant}"
+                daily = self.indices.try_series(cache_key, sources, fetchers) or []
+            daily_by_key[key] = daily
+            return daily
+
+        for key, _, _, _ in resolved:
+            daily_for(key)
+
         for key, raw_spec, variant_name, spec in resolved:
             series_key = prefix + (f"{key}_{variant_name}" if variant_name else key)
             unit = spec.get("unit", "index")
-            daily = self.indices.try_series(series_key, spec.get("sources", []), fetchers) or []
+            daily = daily_for(key)
             # Metrics (last price, daily change, day range) always come from the 1-day feed; the chart's bars
             # come from the requested intraday range so a 5D view still shows a proper daily change.
             live = self._live(series_key, spec, "1d", live_ttl)
@@ -184,7 +225,11 @@ class MacroService:
             entry["variant"] = variant_name
             entry["variants"] = [{"name": n, "label": (v or {}).get("label", n)} for n, v in (raw_spec.get("variants") or {}).items()]
             entry["note"] = spec.get("note")
-            entry["daily_source"] = self.indices.source_used.get(series_key.lower())
+            derived_source = next((src for src in spec.get("sources", []) if str(src.get("type", "")).lower() == "derived_spread"), None)
+            entry["daily_source"] = (
+                derived_source.get("label", "Derived spread") if derived_source
+                else self.indices.source_used.get(series_key.lower())
+            )
             entry["live_source"] = live.source if live else None
             entry["live_note"] = None if (live or not spec.get("live")) else "no live feed reachable"
             if not spec.get("live"):
