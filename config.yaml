@@ -1,0 +1,311 @@
+server:
+  host: 0.0.0.0
+  port: 9488
+
+logging:
+  level: INFO
+  file: logs/app.log
+  max_bytes: 5242880
+  backup_count: 5
+
+data:
+  dir: data
+  db_file: data/trade_plat.db
+  index_cache_ttl_minutes: 30
+  history_days: 1260
+
+longbridge:
+  # Official limit: 10 calls per second per connection. Stay comfortably under it.
+  requests_per_second: 6
+  burst: 6
+  max_retries: 6
+  base_backoff_seconds: 2
+  max_backoff_seconds: 60
+  rate_limit_error_codes: [301606, 429002, 429]
+  # Longbridge also caps how many option contracts may be quoted per minute (error 301607, "Too many option
+  # securities request within one minute"): 400 in a minute passed, 600 failed, and the count resets on the
+  # calendar minute. We track a rolling 60s window, which is never more permissive than the server's bucket.
+  option_contracts_per_minute: 500
+  option_quote_batch_size: 100   # API max is 500 symbols per call; kept small so a batch never blows the minute budget
+  depth_top_n: 12                # candidates per underlying enriched with bid/ask (1 call each)
+  max_expiries_per_symbol: 3     # scenario expiries per underlying (1 chain call + quotes each)
+  max_strikes_per_expiry: 30     # strikes quoted per expiry after thinning
+  reference_strike_band: [0.85, 1.03]   # strikes sampled on the ~30 DTE expiry for ATM IV / skew
+  strike_band: [0.60, 1.00]      # fallback band when ATM IV is unknown
+
+watchlist:
+  default: ["SOXL", "TECL", "KORU", "GOOGL", "MSFT", "AAPL", "AMZN", "SPY", "QQQ", "IWM"]   # US tickers; ".US" is added automatically
+
+indices:
+  # Volatility-complex mini charts: CBOE index names (cdn.cboe.com/.../<NAME>_History.csv) or
+  # {key, label, sources} entries for other providers.
+  charts:
+    - VIX9D
+    - VIX3M
+    - VVIX
+    - DSPX
+    - COR3M
+    - key: MOVE
+      label: ICE BofA MOVE - Treasury implied volatility (daily, via Yahoo ^MOVE)
+      sources: [{type: yahoo, symbol: "^MOVE", label: "Yahoo ^MOVE"}]
+  # ETFs whose 30-day IV is published as a CBOE index: used as the IV-rank source for those tickers.
+  iv_rank_proxies:
+    SPY: VIX
+    QQQ: VXN
+    IWM: RVX
+    DIA: VXD
+    GLD: GVZ
+    USO: OVX
+    EEM: VXEEM
+    EFA: VXEFA
+    SLV: VXSLV
+    TLT: VXTLT
+
+thresholds:
+  vix:                    # < low = LOW, < medium = MEDIUM, < high = HIGH, else VERY_HIGH
+    low: 16
+    medium: 22
+    high: 30
+  iv_rank:                # 0-100 over lookback; < low = LOW, < medium = MEDIUM, < high = HIGH, else EXTREME
+    low: 25
+    medium: 50
+    high: 75
+    lookback_days: 252
+  skew:                   # CBOE SKEW index; < low = LOW, < normal = NORMAL, < high = HIGH, else EXTREME
+    low: 125
+    normal: 140
+    high: 150
+    lookback_days: 252
+  panic_reversal:
+    peak_lookback_days: 15
+    min_peak: 30
+    min_drop_from_peak_pct: 15
+    falling_lookback_days: 5
+
+analytics:
+  risk_free_rate: 0.03
+  dividend_yield: 0.012
+  reference_dte: 30        # expiry used for ATM IV and chain skew metrics
+  skew_delta: 0.25         # chain put skew = IV(25-delta put) / IV(ATM)
+  chain_skew_ratio:        # < low = LOW, < normal = NORMAL, < high = HIGH, else EXTREME
+    low: 1.08
+    normal: 1.20
+    high: 1.35
+  min_snapshots_for_iv_rank: 20        # partial per-stock IV rank from our own daily ATM-IV snapshots
+  min_snapshots_for_full_iv_rank: 120  # snapshots preferred over the LEAPS proxy once this many exist
+
+iv_backfill:
+  # Per-stock IV history rebuilt from a long-dated expiry's daily option closes (Black-Scholes inverted at the
+  # strikes bracketing each day's close). One candlestick call per strike, counted against the option budget.
+  max_strikes: 14
+  days: 270
+  min_dte: 60
+  max_dte: 400
+  min_points: 60           # fewer points than this is reported as a partial proxy
+  max_expiry_attempts: 2   # thin chains: try the next candidate expiry when the first has too little history
+
+iv_snapshot:
+  enabled: true
+  daily_at_et: "16:20"     # weekday refresh of the default watchlist after the US close
+
+macro:
+  live_ttl_seconds: 55     # intraday bars / last price are re-fetched at most this often per series
+  default_range: 1d        # 1d, 5d (intraday) or 1m, 3m, 6m, 1y, 3y, 5y (daily)
+  max_symbols_per_section: 12   # cap on user-added tickers in a `symbols` section (2 Longbridge calls each per refresh)
+
+kalshi:
+  # Prediction-market odds for the next Fed decision (public Kalshi API, no key needed).
+  enabled: true
+  title: Fed decision odds (Kalshi)
+  series_ticker: KXFEDDECISION   # cut / hold / hike outcomes per FOMC meeting (KXFED = rate-level ranges)
+  event: next                    # "next" = nearest open meeting, or an explicit event ticker such as KXFEDDECISION-26DEC
+  markets: []                    # outcome codes or label fragments to chart (e.g. [H25, H0, C25]); empty = all outcomes
+  refresh_seconds: 30
+
+# Live chart sections (3 charts per row, timeframe buttons, minute-by-minute refresh, crosshair).
+# Per series: `sources` = daily history, `live` = intraday bars + last price; both are tried in order and the
+# one that worked is shown in the UI. Series without `live` are daily-only.
+# A section with `symbols` instead of `series` charts plain tickers (Longbridge, Yahoo fallback); the list here is
+# the default and the UI lets the user add/remove tickers (kept per browser).
+live_sections:
+  # Hidden section: feeds the VIX card (live Longbridge index quote + intraday bars on top of the CBOE history).
+  - id: vix
+    title: CBOE VIX
+    hidden: true
+    refresh_seconds: 5
+    series:
+      - key: VIX
+        label: CBOE VIX (live via Longbridge .VIX.US)
+        unit: index
+        sources: [{type: cboe, name: VIX}, {type: fred, id: VIXCLS}]
+        live: [{type: longbridge, symbol: .VIX.US}]
+  - id: stocks
+    title: Stocks & Leveraged ETFs
+    refresh_seconds: 15    # page poll; live_ttl_seconds lets Longbridge bars/quotes refresh that often too
+    live_ttl_seconds: 15
+    symbols: [SOXL, TECL, UPRO, SPXL]   # US tickers; ".US" is added automatically
+  - id: macro
+    title: Rates, Credit & Dollar
+    curve: true            # show Treasury curve spreads in the header
+    series:
+      - key: US2Y
+        label: US 2-year Treasury yield
+        unit: pct
+        sources: [{type: fred, id: DGS2}]
+      - key: US5Y
+        label: US 5-year Treasury yield
+        unit: pct
+        sources: [{type: fred, id: DGS5}]
+        live: [{type: yahoo, symbol: "^FVX"}]
+      - key: US10Y
+        label: US 10-year Treasury yield
+        unit: pct
+        sources: [{type: fred, id: DGS10}]
+        live: [{type: yahoo, symbol: "^TNX"}]
+      - key: US30Y
+        label: US 30-year Treasury yield
+        unit: pct
+        sources: [{type: fred, id: DGS30}]
+        live: [{type: yahoo, symbol: "^TYX"}]
+      - key: VXTLT
+        label: CBOE 20+ year Treasury bond ETF (TLT) volatility index
+        unit: index
+        note: "30-day implied volatility of TLT options - the long-end analogue of the VIX; MOVE (Vol complex) covers the whole curve."
+        sources: [{type: cboe, name: VXTLT}]
+        live: [{type: yahoo, symbol: "^VXTLT"}]
+      - key: JP30Y
+        label: Japan 30-year government bond (JGB) yield
+        unit: pct
+        note: "Japan MOF par yield curve, published once a day after the Tokyo close (no intraday data)."
+        sources: [{type: mof_jgb, tenor: 30Y, label: "Japan MOF"}]
+      - key: HYG
+        label: iShares iBoxx $ High Yield Corporate Bond ETF
+        unit: usd
+        sources: [{type: longbridge, symbol: HYG.US}, {type: yahoo, symbol: HYG}]
+        live: [{type: longbridge, symbol: HYG.US}, {type: yahoo, symbol: HYG}]
+      - key: DXY
+        label: ICE US Dollar Index
+        unit: index
+        sources:
+          - {type: yahoo, symbol: DX-Y.NYB, label: "ICE DXY via Yahoo"}
+          - {type: fred, id: DTWEXBGS, label: "Fed broad dollar index (fallback, different scale)"}
+        live: [{type: yahoo, symbol: DX-Y.NYB}]
+  - id: commodities
+    title: Commodities
+    refresh_seconds: 5     # Sina quotes are polled every 5 s; Yahoo/EIA-backed cards keep their own caching
+    series:
+      # `variants` let the card switch between price bases; `default_variant` picks the initial one.
+      - key: GOLD
+        label: Gold
+        unit: usd
+        default_variant: spot
+        variants:
+          spot:
+            label: Gold spot XAU/USD (London, via Sina, $/oz)
+            note: "London spot gold (伦敦金) from Sina Finance, refreshed every 5 seconds."
+            sources: [{type: sina, symbol: XAU, label: "Sina spot gold"}, {type: yahoo, symbol: "GC=F", label: "Gold futures (history fallback)"}]
+            live: [{type: sina, symbol: XAU}]
+          futures:
+            label: Gold futures (COMEX front month, $/oz)
+            sources: [{type: sina, symbol: GC, label: "Sina COMEX gold"}, {type: yahoo, symbol: "GC=F"}]
+            live: [{type: sina, symbol: GC}, {type: yahoo, symbol: "GC=F"}]
+          etf:
+            label: SPDR Gold Shares (GLD, $/share) - tracks spot gold net of fees
+            note: "Spot proxy: GLD holds physical gold (~0.09 oz/share), so its shape follows spot without futures roll."
+            sources: [{type: longbridge, symbol: GLD.US}, {type: yahoo, symbol: GLD}]
+            live: [{type: longbridge, symbol: GLD.US}, {type: yahoo, symbol: GLD}]
+      - key: SILVER
+        label: Silver
+        unit: usd
+        default_variant: spot
+        variants:
+          spot:
+            label: Silver spot XAG/USD (London, via Sina, $/oz)
+            note: "London spot silver (伦敦银) from Sina Finance, refreshed every 5 seconds."
+            sources: [{type: sina, symbol: XAG, label: "Sina spot silver"}, {type: yahoo, symbol: "SI=F", label: "Silver futures (history fallback)"}]
+            live: [{type: sina, symbol: XAG}]
+          futures:
+            label: Silver futures (COMEX front month, $/oz)
+            sources: [{type: sina, symbol: SI, label: "Sina COMEX silver"}, {type: yahoo, symbol: "SI=F"}]
+            live: [{type: sina, symbol: SI}, {type: yahoo, symbol: "SI=F"}]
+          etf:
+            label: iShares Silver Trust (SLV, $/share) - tracks spot silver net of fees
+            note: "Spot proxy: SLV holds physical silver, so its shape follows spot without futures roll."
+            sources: [{type: longbridge, symbol: SLV.US}, {type: yahoo, symbol: SLV}]
+            live: [{type: longbridge, symbol: SLV.US}, {type: yahoo, symbol: SLV}]
+      - key: BRENT
+        label: Brent crude
+        unit: usd
+        default_variant: futures
+        variants:
+          futures:
+            label: Brent crude (ICE front month via Sina, $/bbl)
+            note: "Sina 布伦特原油 (hf_OIL), refreshed every 5 seconds."
+            sources: [{type: sina, symbol: OIL, label: "Sina Brent"}, {type: yahoo, symbol: "BZ=F"}]
+            live: [{type: sina, symbol: OIL}, {type: yahoo, symbol: "BZ=F"}]
+          spot:
+            label: Brent crude spot FOB (EIA via FRED, daily, $/bbl)
+            note: "EIA daily spot price; published with a 1-2 business day lag, no intraday data."
+            sources: [{type: fred, id: DCOILBRENTEU, label: "EIA Brent spot"}]
+      - key: WTI
+        label: WTI crude
+        unit: usd
+        default_variant: futures
+        variants:
+          futures:
+            label: WTI crude (NYMEX front month via Sina, $/bbl)
+            note: "Sina 纽约原油 (hf_CL), refreshed every 5 seconds."
+            sources: [{type: sina, symbol: CL, label: "Sina WTI"}, {type: yahoo, symbol: "CL=F"}]
+            live: [{type: sina, symbol: CL}, {type: yahoo, symbol: "CL=F"}]
+          spot:
+            label: WTI crude spot FOB Cushing (EIA via FRED, daily, $/bbl)
+            note: "EIA daily spot price; published with a 1-2 business day lag, no intraday data."
+            sources: [{type: fred, id: DCOILWTICO, label: "EIA WTI spot"}]
+      - key: COPPER
+        label: Copper (COMEX front month via Sina, $/lb)
+        unit: usd
+        note: "Sina 美铜 (hf_HG) is quoted in cents/lb and scaled to $/lb; LME spot is not freely available."
+        sources: [{type: sina, symbol: HG, scale: 0.01, label: "Sina COMEX copper"}, {type: yahoo, symbol: "HG=F"}]
+        live: [{type: sina, symbol: HG, scale: 0.01}, {type: yahoo, symbol: "HG=F"}]
+
+scenarios:
+  buy_puts:
+    dte: [45, 120]
+    delta: [0.15, 0.40]
+    min_open_interest: 100
+    max_spread_pct: 12
+    max_results: 12
+  selective_put_selling:
+    dte: [30, 45]
+    delta: [0.08, 0.20]
+    min_open_interest: 200
+    max_spread_pct: 10
+    min_annualized_yield_pct: 8
+    max_results: 12
+  sell_20_delta_puts:
+    dte: [30, 45]
+    delta: [0.15, 0.25]
+    target_delta: 0.20
+    min_open_interest: 200
+    max_spread_pct: 10
+    min_annualized_yield_pct: 6
+    max_results: 12
+  close_shorts_low_delta:
+    dte: [30, 45]
+    delta: [0.03, 0.10]
+    min_open_interest: 200
+    max_spread_pct: 15
+    max_results: 8
+  avoid_naked_puts:
+    dte: [30, 45]
+    delta: [0.02, 0.05]
+    min_open_interest: 200
+    max_spread_pct: 20
+    max_results: 6
+  scale_into_put_selling:
+    dte: [30, 60]
+    delta: [0.10, 0.20]
+    min_open_interest: 200
+    max_spread_pct: 10
+    min_annualized_yield_pct: 6
+    max_results: 12

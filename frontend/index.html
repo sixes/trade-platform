@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trade Plat - Put Regime Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Trade Plat</h1>
+      <span class="subtitle">VIX / SKEW / Fear &amp; Greed regime &amp; US put screener</span>
+    </div>
+    <nav id="section-nav" class="section-nav" aria-label="Sections"></nav>
+    <div class="topbar-right">
+      <button id="fold-charts" class="btn small" type="button" title="Fold or unfold every chart card">Fold charts</button>
+      <div id="status-pill" class="pill pill-idle">Loading...</div>
+    </div>
+  </header>
+
+  <div id="status-banner" class="banner hidden">
+    <div class="banner-row">
+      <span id="banner-spinner" class="spinner"></span>
+      <div class="banner-text">
+        <div id="banner-phase" class="banner-phase"></div>
+        <div id="banner-message" class="banner-message"></div>
+      </div>
+      <button id="cancel-btn" class="btn btn-ghost hidden">Cancel</button>
+    </div>
+    <div class="progress"><div id="banner-progress" class="progress-bar"></div></div>
+  </div>
+
+  <main>
+    <section class="grid-3">
+      <article class="card chart-card" id="card-vix">
+        <div class="card-head">
+          <h2>CBOE VIX</h2>
+          <div class="range-buttons" id="vix-ranges">
+            <button data-range="1d">1D</button>
+            <button data-range="5d">5D</button>
+            <button data-range="3m">3M</button>
+            <button data-range="6m">6M</button>
+            <button data-range="1y" class="active">1Y</button>
+            <button data-range="3y">3Y</button>
+            <button data-range="5y">5Y</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div id="vix-live" class="muted small live-line"></div>
+          <div id="vix-stats" class="stats"></div>
+          <div class="chart-wrap"><canvas id="vix-chart"></canvas></div>
+        </div>
+      </article>
+      <article class="card chart-card" id="card-skew">
+        <div class="card-head">
+          <h2>CBOE SKEW</h2>
+          <span id="skew-source" class="muted small"></span>
+        </div>
+        <div class="card-body">
+          <div id="skew-stats" class="stats"></div>
+          <div class="chart-wrap"><canvas id="skew-chart"></canvas></div>
+        </div>
+      </article>
+      <article class="card chart-card" id="card-fg">
+        <div class="card-head">
+          <h2>CNN Fear &amp; Greed</h2>
+          <span id="fg-source" class="muted small"></span>
+        </div>
+        <div class="card-body">
+          <div id="fg-stats" class="stats"></div>
+          <div class="chart-wrap chart-wrap-short"><canvas id="fg-chart"></canvas></div>
+          <div id="fg-components" class="components"></div>
+        </div>
+      </article>
+    </section>
+
+    <section class="card chart-card" id="card-volcomplex">
+      <div class="card-head">
+        <h2>Volatility Complex</h2>
+        <span id="term-structure" class="muted small"></span>
+      </div>
+      <div class="card-body">
+        <div id="mini-charts" class="mini-grid"></div>
+      </div>
+    </section>
+
+    <div id="live-sections"></div>
+
+    <section class="card chart-card" id="card-kalshi">
+      <div class="card-head macro-head">
+        <h2 id="kalshi-title">Fed decision odds (Kalshi)</h2>
+        <div class="range-buttons" id="kalshi-ranges">
+          <button data-range="1d">1D</button>
+          <button data-range="5d">5D</button>
+          <button data-range="1m" class="active">1M</button>
+          <button data-range="3m">3M</button>
+          <button data-range="all">ALL</button>
+        </div>
+        <span id="kalshi-live" class="muted small"></span>
+        <span id="kalshi-event" class="muted small"></span>
+      </div>
+      <div class="card-body">
+        <div class="kalshi-body">
+          <div class="chart-wrap kalshi-chart"><canvas id="kalshi-chart"></canvas></div>
+          <div id="kalshi-table" class="table-wrap"></div>
+        </div>
+        <div id="kalshi-note" class="muted small"></div>
+      </div>
+    </section>
+
+    <template id="live-section-template">
+      <section class="card chart-card">
+        <div class="card-head macro-head">
+          <h2></h2>
+          <div class="range-buttons">
+            <button data-range="1d">1D</button>
+            <button data-range="5d">5D</button>
+            <button data-range="1m">1M</button>
+            <button data-range="3m">3M</button>
+            <button data-range="6m">6M</button>
+            <button data-range="1y">1Y</button>
+            <button data-range="5y">5Y</button>
+          </div>
+          <span class="muted small live-status"></span>
+          <span class="muted small curve-summary"></span>
+          <form class="symbol-editor hidden">
+            <input type="text" placeholder="Add US ticker(s), e.g. NVDA, TQQQ" maxlength="120" autocomplete="off" spellcheck="false" aria-label="Add ticker">
+            <button type="submit" class="btn small">Add</button>
+            <button type="button" class="btn small btn-ghost symbol-reset" title="Restore the default tickers from config.yaml">Reset</button>
+            <span class="muted small symbol-hint"></span>
+          </form>
+        </div>
+        <div class="card-body">
+          <div class="macro-grid"></div>
+        </div>
+      </section>
+    </template>
+
+    <section class="card" id="regime-card">
+      <div class="card-head">
+        <h2>Current Regime</h2>
+        <span id="regime-confidence" class="muted small"></span>
+      </div>
+      <div class="card-body">
+        <div id="regime-body" class="regime-body"></div>
+      </div>
+    </section>
+
+    <section class="card" id="watchlist-card">
+      <div class="card-head">
+        <h2>Watchlist IV Rank</h2>
+        <span id="watchlist-meta" class="muted small"></span>
+      </div>
+      <div class="card-body">
+        <form id="watchlist-form" class="scan-row">
+          <label>US tickers
+            <input id="watchlist-input" type="text" placeholder="SPY, QQQ, IWM, AAPL" autocomplete="off" spellcheck="false">
+          </label>
+          <button id="watchlist-btn" class="btn btn-primary" type="submit">Refresh IV</button>
+          <button id="watchlist-show" class="btn btn-ghost" type="button">Show stored</button>
+        </form>
+        <div id="watchlist-hint" class="muted small"></div>
+        <div id="watchlist-results" class="table-wrap"></div>
+      </div>
+    </section>
+
+    <section class="card" id="card-screener">
+      <div class="card-head">
+        <h2>Put Screener</h2>
+        <span id="scan-meta" class="muted small"></span>
+      </div>
+      <div class="card-body">
+        <form id="scan-form" class="scan-form">
+          <div class="scan-row">
+            <label>US tickers
+              <input id="symbols-input" type="text" placeholder="SPY, QQQ, IWM" autocomplete="off" spellcheck="false">
+            </label>
+            <label>Scenario
+              <select id="scenario-select"><option value="">Auto (from regime)</option></select>
+            </label>
+            <button id="scan-btn" class="btn btn-primary" type="submit">Scan puts</button>
+          </div>
+          <fieldset class="filters">
+            <legend>Screener parameters <span id="filters-scenario" class="muted"></span></legend>
+            <div class="filters-grid">
+              <label>DTE min <input type="number" name="dte_min" min="1" max="730" step="1" required></label>
+              <label>DTE max <input type="number" name="dte_max" min="1" max="730" step="1" required></label>
+              <label>|Delta| min <input type="number" name="delta_min" min="0" max="1" step="0.01" required></label>
+              <label>|Delta| max <input type="number" name="delta_max" min="0" max="1" step="0.01" required></label>
+              <label>Min open interest <input type="number" name="min_open_interest" min="0" step="1" required></label>
+              <label>Max spread % <input type="number" name="max_spread_pct" min="0" max="100" step="0.5" required></label>
+              <label>Min annualized yield % <input type="number" name="min_annualized_yield_pct" min="0" step="0.5" placeholder="off"></label>
+              <label>Target |delta| <input type="number" name="target_delta" min="0" max="1" step="0.01" placeholder="off"></label>
+              <label>Max results <input type="number" name="max_results" min="1" max="50" step="1" required></label>
+            </div>
+            <div class="filters-actions">
+              <span id="filters-state" class="muted small"></span>
+              <button id="filters-reset" class="btn btn-ghost small" type="button">Reset to scenario defaults</button>
+            </div>
+          </fieldset>
+        </form>
+        <div id="scan-hint" class="muted small"></div>
+        <div id="results"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="muted small">
+    Data: CBOE (VIX, SKEW, vol indices, VXTLT) with FRED fallback, FRED Treasury yields, Japan MOF JGB yields, Yahoo Finance (DXY), CNN Fear &amp; Greed; stock prices and option quotes via Longbridge OpenAPI. Not investment advice.
+  </footer>
+
+  <script src="/static/vendor/chart.umd.js" onerror="var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js';s.integrity='sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG';s.crossOrigin='anonymous';document.head.appendChild(s);"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
