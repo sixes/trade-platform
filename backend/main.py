@@ -314,6 +314,7 @@ def api_config():
                 "action": s.action,
                 "description": s.description,
                 "target": s.target,
+                "option_side": settings.get(f"scenarios.{s.key}.option_side", "put"),
                 "filters": settings.section(f"scenarios.{s.key}"),
             }
             for s in SCENARIOS

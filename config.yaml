@@ -338,6 +338,13 @@ live_sections:
         live: [{type: sina, symbol: HG, scale: 0.01}, {type: yahoo, symbol: "HG=F"}]
 
 scenarios:
+  buy_cheap_calls:
+    option_side: call
+    dte: [90, 730]
+    delta: [0.15, 0.85]
+    min_open_interest: 100
+    max_spread_pct: 12
+    max_results: 12
   buy_puts:
     dte: [45, 120]
     delta: [0.15, 0.40]

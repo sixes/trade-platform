@@ -1,6 +1,10 @@
+import re
 import threading
 import time
-from datetime import datetime
+from copy import deepcopy
+from datetime import date, datetime
+from decimal import Decimal
+from unittest.mock import Mock
 
 import pytest
 
@@ -10,6 +14,7 @@ from backend.jobs import DailySnapshotScheduler, IvRankResolver, IvRefreshServic
 from backend.market_data.longbridge import AuthError, LongbridgeClient, QuotaExhausted, ScanCancelled
 from backend.storage.db import Database
 from tests.fakes import FakeLongbridge
+from tests.test_longbridge import quote_client, sdk_quote
 from tests.test_regime import make_series
 
 SETTINGS = load_settings()
@@ -52,9 +57,40 @@ def run_scan(db, fake, symbols, scenario=None, filters=None):
     return scanner.run(job), job
 
 
+def provider_backed_quotes(fake, monkeypatch, call_iv_scale=1.0):
+    quotes = [sdk_quote(
+        row.symbol, underlying_symbol=row.underlying, expiry_date=row.expiry,
+        strike_price=Decimal(str(row.strike)), last_done=Decimal(str(row.last)) if row.last is not None else None,
+        implied_volatility=Decimal(str(row.iv * (call_iv_scale if row.option_side == "call" else 1))),
+        open_interest=row.open_interest, volume=row.volume,
+    ) for row in fake._rows.values()]
+    adapter = quote_client(quotes)
+    adapter.quota = fake.quota
+    monkeypatch.setattr(fake, "option_quotes", adapter.option_quotes)
+    return adapter
+
+
+def assert_contract_sides(result, side):
+    assert result["scenario"]["option_side"] == result["scenario"]["filters"]["option_side"] == side
+    for underlying in result["underlyings"]:
+        assert not underlying.get("error") and underlying["option_side"] == side
+        assert underlying["candidates"]
+        for candidate in underlying["candidates"]:
+            match = re.fullmatch(r"([A-Z]{1,6})([0-9]{6})([CP])([0-9]{1,8})\.US", candidate["symbol"])
+            assert match is not None
+            root, expiry, marker, strike = match.groups()
+            assert marker == ("C" if side == "call" else "P")
+            assert candidate["option_side"] == side
+            assert candidate["underlying"] == underlying["underlying"] == f"{root}.US"
+            assert date.fromisoformat(candidate["expiry"]).strftime("%y%m%d") == expiry
+            assert Decimal(str(candidate["strike"])) == Decimal(strike) / 1000
+            assert (candidate["delta"] > 0) if side == "call" else (candidate["delta"] < 0)
+
+
 def test_scan_pipeline_produces_ranked_candidates_and_snapshots(db):
     fake = FakeLongbridge()
     result, job = run_scan(db, fake, ["SPY.US"])
+    assert_contract_sides(result, "put")
 
     assert result["scenario"]["key"] == "sell_20_delta_puts"
     assert result["scenario_source"] == "regime"
@@ -98,18 +134,127 @@ def test_scenario_override_changes_filters(db):
         assert cfg["delta"][0] <= abs(c["delta"]) <= cfg["delta"][1]
 
 
-def test_custom_filters_replace_scenario_defaults(db):
+@pytest.mark.parametrize("scenario", ["buy_cheap_calls", None], ids=["explicit", "regime"])
+def test_cheap_calls_scan_returns_long_dated_calls(db, monkeypatch, scenario):
     fake = FakeLongbridge()
+    provider_backed_quotes(fake, monkeypatch)
+    market = StubMarket([14, 14], [120, 120]) if scenario is None else StubMarket([19, 19], [130, 130])
+    scanner = ScanService(SETTINGS, fake, market, db)
+    defaults = SETTINGS.section("scenarios.buy_cheap_calls")
+    original = deepcopy(defaults)
+    result = scanner.run(Job("scan", ["SPY.US"], scenario))
+    assert result["scenario"]["key"] == "buy_cheap_calls"
+    assert_contract_sides(result, "call")
+    assert result["scenario_source"] == ("override" if scenario else "regime")
+    assert result["scenario"]["filters_source"] == "default"
+    assert result["scenario"]["filters"] is not defaults and defaults == original
+    candidates = result["underlyings"][0]["candidates"]
+    assert all(90 <= c["dte"] <= 730 and 0.15 <= c["delta"] <= 0.85 for c in candidates)
+    assert all(c["contract_premium"] > 0 and c["extrinsic_cost_per_delta_pct"] is not None for c in candidates)
+    assert result["underlyings"][0]["stats"]["contracts_quoted"] > 0
+    assert result["underlyings"][0]["stats"]["puts_quoted"] == 0
+
+
+@pytest.mark.parametrize("scenario", ["buy_cheap_calls", None], ids=["explicit", "regime"])
+@pytest.mark.parametrize("override_side", [False, True], ids=["side-omitted", "conflicting-side"])
+def test_custom_calls_overlapping_reference_puts_keep_identity(db, monkeypatch, scenario, override_side):
+    fake = FakeLongbridge()
+    # Distinct put/call IVs make reference contamination observable even at identical strikes.
+    adapter = provider_backed_quotes(fake, monkeypatch, call_iv_scale=0.5)
+    depth = Mock(wraps=fake.depth)
+    monkeypatch.setattr(fake, "depth", depth)
+    market = StubMarket([14, 14], [120, 120]) if scenario is None else StubMarket([19, 19], [130, 130])
+    scanner = ScanService(SETTINGS, fake, market, db)
+    custom = {"dte": [30, 32], "delta": [0, 1], "min_open_interest": 0,
+              "max_spread_pct": 100, "max_results": 6}
+    if override_side:
+        custom["option_side"] = "put"
+    original = deepcopy(custom)
+    defaults = deepcopy(SETTINGS.section("scenarios.buy_cheap_calls"))
+    job = Job("scan", ["SPY.US"], scenario, custom)
+    result = scanner.run(job)
+
+    assert result["scenario"]["key"] == "buy_cheap_calls"
+    assert result["scenario_source"] == ("override" if scenario else "regime")
+    assert result["scenario"]["filters_source"] == "custom"
+    assert result["scenario"]["filters"] == dict(custom, option_side="call")
+    assert result["scenario"]["filters"] is not custom
+    assert job.filters == custom == original
+    assert SETTINGS.section("scenarios.buy_cheap_calls") == defaults
+    assert_contract_sides(result, "call")
+    u = result["underlyings"][0]
+    assert u["reference"]["expiry"] in u["expiries"]
+    assert u["reference"]["atm_iv"] == pytest.approx(0.18)
+    assert u["reference"]["otm_put_iv"] > u["reference"]["atm_iv"]
+    assert u["atm_iv_by_expiry"][u["reference"]["expiry"]] == pytest.approx(0.09)
+    assert all(30 <= c["dte"] <= 32 and c["delta_target_gap"] is None for c in u["candidates"])
+    assert 1 <= len(u["candidates"]) <= 6
+    quoted = [symbol for batch in adapter._ctx.requests for symbol in batch]
+    put_symbols = {symbol for symbol in quoted if re.fullmatch(r"SPY[0-9]{6}P[0-9]+\.US", symbol)}
+    assert put_symbols and any(re.sub(r"([0-9]{6})P", r"\1C", symbol) in quoted for symbol in put_symbols)
+    assert u["stats"]["skipped"]["wrong_side"] == len(put_symbols)
+    assert depth.call_args_list and all(re.fullmatch(r"SPY[0-9]{6}C[0-9]+\.US", call.args[0])
+                                        for call in depth.call_args_list)
+    assert db.atm_iv_history("SPY.US")[0][1] == pytest.approx(0.18)
+
+
+def test_empty_custom_filters_do_not_restore_scenario_defaults(db):
+    custom = {}
+    result, job = run_scan(db, FakeLongbridge(), ["SPY.US"], scenario="buy_cheap_calls", filters=custom)
+    assert result["scenario"]["filters"] == {"option_side": "call"}
+    assert result["scenario"]["filters_source"] == "custom"
+    assert job.snapshot()["custom_filters"] is True and custom == {}
+    assert_contract_sides(result, "call")
+
+
+@pytest.mark.parametrize("explicit_nulls", [False, True], ids=["omitted", "cleared"])
+def test_custom_filters_replace_scenario_defaults(db, monkeypatch, explicit_nulls):
+    fake = FakeLongbridge()
+    provider_backed_quotes(fake, monkeypatch)
     custom = {"dte": [55, 100], "delta": [0.05, 0.12], "min_open_interest": 0, "max_spread_pct": 50, "max_results": 3}
-    result, _ = run_scan(db, fake, ["SPY.US"], filters=custom)
+    if explicit_nulls:
+        custom.update(min_annualized_yield_pct=None, target_delta=None)
+    original = deepcopy(custom)
+    defaults = deepcopy(SETTINGS.section("scenarios.sell_20_delta_puts"))
+    result, job = run_scan(db, fake, ["SPY.US"], filters=custom)
     assert result["scenario"]["key"] == "sell_20_delta_puts"
     assert result["scenario"]["filters_source"] == "custom"
-    assert result["scenario"]["filters"] == custom
+    assert result["scenario"]["filters"] == dict(custom, option_side="put")
+    assert result["scenario"]["filters"] is not custom
+    assert job.filters == custom == original
+    assert SETTINGS.section("scenarios.sell_20_delta_puts") == defaults
+    assert_contract_sides(result, "put")
     candidates = result["underlyings"][0]["candidates"]
     assert 1 <= len(candidates) <= 3
+    assert any(c["annualized_yield_pct"] < defaults["min_annualized_yield_pct"] for c in candidates)
     for c in candidates:
         assert 55 <= c["dte"] <= 100
         assert 0.05 <= abs(c["delta"]) <= 0.12
+        assert c["delta_target_gap"] is None
+
+
+def test_unrecognized_provider_contract_is_reported_without_candidates(db, monkeypatch):
+    fake = FakeLongbridge()
+    adapter = provider_backed_quotes(fake, monkeypatch)
+    original_quote = adapter._ctx.option_quote
+
+    def invalid_call_quote(symbols):
+        quotes = original_quote(symbols)
+        for quote in quotes:
+            if re.fullmatch(r"SPY[0-9]{6}C[0-9]+\.US", quote.symbol):
+                quote.symbol = "unrecognized-contract.US"
+                break
+        return quotes
+
+    monkeypatch.setattr(adapter._ctx, "option_quote", invalid_call_quote)
+    depth = Mock(wraps=fake.depth)
+    monkeypatch.setattr(fake, "depth", depth)
+    result, _ = run_scan(db, fake, ["SPY.US"], scenario="buy_cheap_calls")
+    u = result["underlyings"][0]
+    assert u["candidates"] == [] and "unrecognized option symbol" in u["error"]
+    assert result["warnings"] == [f"SPY.US: {u['error']}"]
+    assert result["scenario"]["option_side"] == "call"
+    assert not depth.called
 
 
 def test_job_manager_runs_in_background_and_rejects_concurrent_scans(db):

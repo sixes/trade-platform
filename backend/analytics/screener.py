@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from backend.analytics.greeks import put_delta, put_theta_per_day, strike_for_put_delta
+from backend.analytics.greeks import call_delta, call_theta_per_day, put_delta, put_theta_per_day, strike_for_call_delta, strike_for_put_delta
 from backend.analytics.indicators import classify_level
 from backend.market_data.longbridge import OptionQuoteRow
 
@@ -15,13 +15,19 @@ CHAIN_SKEW_LEVELS = ("LOW", "NORMAL", "HIGH", "EXTREME")
 
 
 def strike_band_for_deltas(spot: float, delta_lo: float, delta_hi: float, dte: int, atm_iv: Optional[float],
-                           skew_ratio: Optional[float], r: float, q: float, fallback: Sequence[float] = (0.6, 1.0)) -> Tuple[float, float]:
+                           skew_ratio: Optional[float], r: float, q: float, fallback: Sequence[float] = (0.6, 1.0),
+                           option_side: str = "put") -> Tuple[float, float]:
     """Strike range that should contain every put with |delta| in [delta_lo, delta_hi], with a safety margin."""
     if not atm_iv or atm_iv <= 0 or dte <= 0:
         return spot * fallback[0], spot * fallback[1]
     t = dte / 365.0
+    if option_side == "call":
+        lo = strike_for_call_delta(spot, delta_hi, t, atm_iv, r, q)
+        hi = strike_for_call_delta(spot, delta_lo, t, atm_iv, r, q)
+        lo = (lo or spot * 0.5) * 0.96
+        hi = (hi or spot * 1.5) * 1.04
+        return (lo, hi) if hi > lo else (spot * 0.5, spot * 1.5)
     skew = max(skew_ratio or 1.0, 1.0)
-    # Far-OTM puts carry higher IV than ATM, which pushes the same delta further down: assume a steep skew.
     lo = strike_for_put_delta(spot, delta_lo, t, atm_iv * skew * 1.35, r, q)
     hi = strike_for_put_delta(spot, delta_hi, t, atm_iv * 0.8, r, q)
     lo = (lo or spot * fallback[0]) * 0.96
@@ -45,9 +51,10 @@ def subsample_strikes(items: Sequence, max_count: int) -> List:
 
 
 @dataclass
-class PutCandidate:
+class OptionCandidate:
     symbol: str
     underlying: str
+    option_side: str
     expiry: str
     dte: int
     strike: float
@@ -73,6 +80,12 @@ class PutCandidate:
     cushion_pct: Optional[float] = None
     cost_pct_of_spot: Optional[float] = None
     cost_per_delta_pct: Optional[float] = None
+    intrinsic_value: Optional[float] = None
+    extrinsic_value: Optional[float] = None
+    extrinsic_cost_per_delta_pct: Optional[float] = None
+    contract_premium: Optional[float] = None
+    breakeven_upside_pct: Optional[float] = None
+    moneyness: Optional[str] = None
     delta_target_gap: Optional[float] = None
     score: Optional[float] = None
     rank: Optional[int] = None
@@ -82,10 +95,19 @@ class PutCandidate:
         return asdict(self)
 
 
-def build_candidates(rows: Sequence[OptionQuoteRow], spot: float, today: date, r: float, q: float) -> Tuple[List[PutCandidate], dict]:
-    out: List[PutCandidate] = []
-    skipped = {"expired": 0, "no_iv": 0, "no_delta": 0, "bad_status": 0}
+def build_candidates(rows: Sequence[OptionQuoteRow], spot: float, today: date, r: float, q: float,
+                     option_side: str = "put") -> Tuple[List[OptionCandidate], dict]:
+    out: List[OptionCandidate] = []
+    skipped = {"expired": 0, "no_iv": 0, "no_delta": 0, "bad_status": 0, "wrong_side": 0, "invalid_side": 0}
     for row in rows:
+        # Reference puts may share an expiry/strike with calls, but not their identity.
+        side = row.option_side
+        if side not in ("put", "call"):
+            skipped["invalid_side"] += 1
+            continue
+        if side != option_side:
+            skipped["wrong_side"] += 1
+            continue
         dte = (row.expiry - today).days
         if dte <= 0:
             skipped["expired"] += 1
@@ -98,13 +120,14 @@ def build_candidates(rows: Sequence[OptionQuoteRow], spot: float, today: date, r
             skipped["no_iv"] += 1
             continue
         t = dte / 365.0
-        delta = put_delta(spot, row.strike, t, row.iv, r, q)
+        delta = call_delta(spot, row.strike, t, row.iv, r, q) if side == "call" else put_delta(spot, row.strike, t, row.iv, r, q)
         if delta is None:
             skipped["no_delta"] += 1
             continue
-        cand = PutCandidate(
+        cand = OptionCandidate(
             symbol=row.symbol,
             underlying=row.underlying,
+            option_side=side,
             expiry=row.expiry.isoformat(),
             dte=dte,
             strike=row.strike,
@@ -113,7 +136,7 @@ def build_candidates(rows: Sequence[OptionQuoteRow], spot: float, today: date, r
             last=row.last if row.last and row.last > 0 else None,
             iv=row.iv,
             delta=delta,
-            theta_per_day=put_theta_per_day(spot, row.strike, t, row.iv, r, q),
+            theta_per_day=call_theta_per_day(spot, row.strike, t, row.iv, r, q) if side == "call" else put_theta_per_day(spot, row.strike, t, row.iv, r, q),
             open_interest=row.open_interest,
             volume=row.volume,
             contract_multiplier=row.contract_multiplier,
@@ -124,21 +147,34 @@ def build_candidates(rows: Sequence[OptionQuoteRow], spot: float, today: date, r
     return out, skipped
 
 
-def recompute(c: PutCandidate) -> None:
+def recompute(c: OptionCandidate) -> None:
     price = c.price
     if price is None or price <= 0:
         c.premium_yield_pct = c.annualized_yield_pct = c.breakeven = c.cushion_pct = None
         c.cost_pct_of_spot = c.cost_per_delta_pct = None
+        c.intrinsic_value = c.extrinsic_value = c.extrinsic_cost_per_delta_pct = None
+        c.contract_premium = c.breakeven_upside_pct = None
         return
-    c.premium_yield_pct = price / c.strike * 100.0
-    c.annualized_yield_pct = c.premium_yield_pct * 365.0 / max(c.dte, 1)
-    c.breakeven = c.strike - price
-    c.cushion_pct = (c.spot - c.breakeven) / c.spot * 100.0
     c.cost_pct_of_spot = price / c.spot * 100.0
     c.cost_per_delta_pct = c.cost_pct_of_spot / max(abs(c.delta), 1e-6)
+    c.contract_premium = price * c.contract_multiplier
+    if c.option_side == "call":
+        c.intrinsic_value = max(c.spot - c.strike, 0.0)
+        c.extrinsic_value = max(price - c.intrinsic_value, 0.0)
+        c.extrinsic_cost_per_delta_pct = (c.extrinsic_value / c.spot * 100.0) / max(c.delta, 1e-6)
+        c.breakeven = c.strike + price
+        c.breakeven_upside_pct = (c.breakeven / c.spot - 1.0) * 100.0
+        c.moneyness = "ITM" if c.strike < c.spot * 0.99 else "OTM" if c.strike > c.spot * 1.01 else "ATM"
+        c.premium_yield_pct = c.annualized_yield_pct = c.cushion_pct = None
+    else:
+        c.premium_yield_pct = price / c.strike * 100.0
+        c.annualized_yield_pct = c.premium_yield_pct * 365.0 / max(c.dte, 1)
+        c.breakeven = c.strike - price
+        c.cushion_pct = (c.spot - c.breakeven) / c.spot * 100.0
+        c.moneyness = "ITM" if c.strike > c.spot * 1.01 else "OTM" if c.strike < c.spot * 0.99 else "ATM"
 
 
-def apply_depth(c: PutCandidate, bid: Optional[float], ask: Optional[float]) -> None:
+def apply_depth(c: OptionCandidate, bid: Optional[float], ask: Optional[float]) -> None:
     c.bid, c.ask = bid, ask
     if bid and ask and ask >= bid > 0:
         c.mid = (bid + ask) / 2
@@ -153,10 +189,10 @@ def apply_depth(c: PutCandidate, bid: Optional[float], ask: Optional[float]) -> 
     recompute(c)
 
 
-def reference_metrics(cands: Sequence[PutCandidate], reference_dte: int, skew_delta: float, skew_cuts: dict) -> dict:
+def reference_metrics(cands: Sequence[OptionCandidate], reference_dte: int, skew_delta: float, skew_cuts: dict) -> dict:
     if not cands:
         return {}
-    by_expiry: Dict[str, List[PutCandidate]] = {}
+    by_expiry: Dict[str, List[OptionCandidate]] = {}
     for c in cands:
         by_expiry.setdefault(c.expiry, []).append(c)
     ref_expiry = min(by_expiry, key=lambda e: abs(by_expiry[e][0].dte - reference_dte))
@@ -181,7 +217,7 @@ def reference_metrics(cands: Sequence[PutCandidate], reference_dte: int, skew_de
     }
 
 
-def _interpolate(sorted_items: Sequence[PutCandidate], key, target: float, value) -> Optional[float]:
+def _interpolate(sorted_items: Sequence[OptionCandidate], key, target: float, value) -> Optional[float]:
     if not sorted_items:
         return None
     lower = [c for c in sorted_items if key(c) <= target]
@@ -197,10 +233,10 @@ def _interpolate(sorted_items: Sequence[PutCandidate], key, target: float, value
     return value(nearest)
 
 
-def atm_iv_by_expiry(cands: Sequence[PutCandidate], max_gap_pct: float = 3.0) -> Dict[str, float]:
+def atm_iv_by_expiry(cands: Sequence[OptionCandidate], max_gap_pct: float = 3.0) -> Dict[str, float]:
     """Per-expiry ATM IV interpolated from the strikes bracketing spot (or the nearest strike within max_gap_pct)."""
     out: Dict[str, float] = {}
-    by_expiry: Dict[str, List[PutCandidate]] = {}
+    by_expiry: Dict[str, List[OptionCandidate]] = {}
     for c in cands:
         by_expiry.setdefault(c.expiry, []).append(c)
     for expiry, chain in by_expiry.items():
@@ -217,8 +253,8 @@ def atm_iv_by_expiry(cands: Sequence[PutCandidate], max_gap_pct: float = 3.0) ->
     return out
 
 
-def filter_candidates(cands: Sequence[PutCandidate], scenario_cfg: dict, atm_iv: Optional[float], enforce_spread: bool = False,
-                      atm_by_expiry: Optional[Dict[str, float]] = None) -> List[PutCandidate]:
+def filter_candidates(cands: Sequence[OptionCandidate], scenario_cfg: dict, atm_iv: Optional[float], enforce_spread: bool = False,
+                      atm_by_expiry: Optional[Dict[str, float]] = None) -> List[OptionCandidate]:
     dte_lo, dte_hi = scenario_cfg.get("dte", [30, 45])
     delta_lo, delta_hi = scenario_cfg.get("delta", [0.1, 0.3])
     min_oi = int(scenario_cfg.get("min_open_interest", 0))
@@ -226,11 +262,11 @@ def filter_candidates(cands: Sequence[PutCandidate], scenario_cfg: dict, atm_iv:
     max_spread = scenario_cfg.get("max_spread_pct")
     target_delta = scenario_cfg.get("target_delta")
     atm_by_expiry = atm_by_expiry or {}
-    out: List[PutCandidate] = []
+    out: List[OptionCandidate] = []
     for c in cands:
         if not (dte_lo <= c.dte <= dte_hi):
             continue
-        if c.strike >= c.spot:
+        if c.option_side == "put" and c.strike >= c.spot:
             continue
         if not (delta_lo <= abs(c.delta) <= delta_hi):
             continue
@@ -252,6 +288,7 @@ def filter_candidates(cands: Sequence[PutCandidate], scenario_cfg: dict, atm_iv:
 # (metric, higher_is_better, weight)
 SCORE_WEIGHTS: Dict[str, List[Tuple[str, bool, float]]] = {
     "buy_puts": [("iv_ratio", False, 0.35), ("cost_per_delta_pct", False, 0.30), ("open_interest", True, 0.20), ("spread_pct", False, 0.15)],
+    "buy_cheap_calls": [("extrinsic_cost_per_delta_pct", False, 0.30), ("iv_ratio", False, 0.25), ("contract_premium", False, 0.25), ("open_interest", True, 0.10), ("spread_pct", False, 0.10)],
     "selective_put_selling": [("annualized_yield_pct", True, 0.30), ("iv_ratio", True, 0.30), ("cushion_pct", True, 0.15), ("open_interest", True, 0.15), ("spread_pct", False, 0.10)],
     "sell_20_delta_puts": [("annualized_yield_pct", True, 0.30), ("delta_target_gap", False, 0.25), ("cushion_pct", True, 0.15), ("open_interest", True, 0.20), ("spread_pct", False, 0.10)],
     "close_shorts_low_delta": [("cushion_pct", True, 0.35), ("annualized_yield_pct", True, 0.25), ("open_interest", True, 0.25), ("spread_pct", False, 0.15)],
@@ -278,7 +315,7 @@ def _percentile_scores(values: List[Optional[float]], higher_is_better: bool) ->
     return out
 
 
-def score_candidates(cands: List[PutCandidate], scenario_key: str, max_spread_pct: Optional[float] = None) -> List[PutCandidate]:
+def score_candidates(cands: List[OptionCandidate], scenario_key: str, max_spread_pct: Optional[float] = None) -> List[OptionCandidate]:
     weights = SCORE_WEIGHTS.get(scenario_key, SCORE_WEIGHTS["sell_20_delta_puts"])
     if not cands:
         return []
@@ -296,7 +333,7 @@ def score_candidates(cands: List[PutCandidate], scenario_key: str, max_spread_pc
     return ranked
 
 
-def _flags(c: PutCandidate, max_spread_pct: Optional[float]) -> List[str]:
+def _flags(c: OptionCandidate, max_spread_pct: Optional[float]) -> List[str]:
     flags: List[str] = []
     if c.spread_pct is not None and max_spread_pct is not None and c.spread_pct > float(max_spread_pct):
         flags.append("wide_spread")

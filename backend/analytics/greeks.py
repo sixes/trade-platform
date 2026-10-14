@@ -29,11 +29,25 @@ def put_delta(spot: float, strike: float, t: float, sigma: Optional[float], r: f
     return -math.exp(-q * t) * norm_cdf(-d1)
 
 
+def call_delta(spot: float, strike: float, t: float, sigma: Optional[float], r: float = 0.0, q: float = 0.0) -> Optional[float]:
+    if not _valid(spot, strike, t, sigma):
+        return None
+    d1, _ = _d1_d2(spot, strike, t, sigma, r, q)
+    return math.exp(-q * t) * norm_cdf(d1)
+
+
 def put_price(spot: float, strike: float, t: float, sigma: Optional[float], r: float = 0.0, q: float = 0.0) -> Optional[float]:
     if not _valid(spot, strike, t, sigma):
         return None
     d1, d2 = _d1_d2(spot, strike, t, sigma, r, q)
     return strike * math.exp(-r * t) * norm_cdf(-d2) - spot * math.exp(-q * t) * norm_cdf(-d1)
+
+
+def call_price(spot: float, strike: float, t: float, sigma: Optional[float], r: float = 0.0, q: float = 0.0) -> Optional[float]:
+    if not _valid(spot, strike, t, sigma):
+        return None
+    d1, d2 = _d1_d2(spot, strike, t, sigma, r, q)
+    return spot * math.exp(-q * t) * norm_cdf(d1) - strike * math.exp(-r * t) * norm_cdf(d2)
 
 
 def put_theta_per_day(spot: float, strike: float, t: float, sigma: Optional[float], r: float = 0.0, q: float = 0.0) -> Optional[float]:
@@ -44,6 +58,18 @@ def put_theta_per_day(spot: float, strike: float, t: float, sigma: Optional[floa
         -spot * math.exp(-q * t) * norm_pdf(d1) * sigma / (2 * math.sqrt(t))
         + r * strike * math.exp(-r * t) * norm_cdf(-d2)
         - q * spot * math.exp(-q * t) * norm_cdf(-d1)
+    )
+    return theta / 365.0
+
+
+def call_theta_per_day(spot: float, strike: float, t: float, sigma: Optional[float], r: float = 0.0, q: float = 0.0) -> Optional[float]:
+    if not _valid(spot, strike, t, sigma):
+        return None
+    d1, d2 = _d1_d2(spot, strike, t, sigma, r, q)
+    theta = (
+        -spot * math.exp(-q * t) * norm_pdf(d1) * sigma / (2 * math.sqrt(t))
+        - r * strike * math.exp(-r * t) * norm_cdf(d2)
+        + q * spot * math.exp(-q * t) * norm_cdf(d1)
     )
     return theta / 365.0
 
@@ -64,6 +90,16 @@ def strike_for_put_delta(spot: float, delta_abs: float, t: float, sigma: float, 
     # |delta| = e^{-qT} N(-d1)  =>  d1 = -N^{-1}(|delta| e^{qT})
     p = min(0.999999, delta_abs * math.exp(q * t))
     d1 = -NormalDist().inv_cdf(p)
+    return spot * math.exp(-d1 * sigma * math.sqrt(t) + (r - q + 0.5 * sigma * sigma) * t)
+
+
+def strike_for_call_delta(spot: float, delta: float, t: float, sigma: float, r: float = 0.0, q: float = 0.0) -> Optional[float]:
+    if not _valid(spot, spot, t, sigma) or not (0 < delta < 1):
+        return None
+    from statistics import NormalDist
+
+    p = min(0.999999, delta * math.exp(q * t))
+    d1 = NormalDist().inv_cdf(p)
     return spot * math.exp(-d1 * sigma * math.sqrt(t) + (r - q + 0.5 * sigma * sigma) * t)
 
 

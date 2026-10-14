@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Callable, List, Optional, Sequence, Tuple, TypeVar
 
 from backend.config import Settings
@@ -16,6 +17,8 @@ log = logging.getLogger(__name__)
 T = TypeVar("T")
 
 OPTION_QUOTA_CODE = 301607  # "Too many option securities request within one minute"
+# LongPort thousandths strikes may omit OCC's leading zero padding.
+OPTION_SYMBOL_RE = re.compile(r"([A-Z]{1,6})([0-9]{6})([CP])([0-9]{1,8})\.US")
 
 
 class LongbridgeError(Exception):
@@ -53,6 +56,23 @@ def normalize_iv(value) -> Optional[float]:
     return iv / 100.0 if iv > 3 else iv
 
 
+def _verified_option_side(symbol: str, expiry: date, strike) -> str:
+    match = OPTION_SYMBOL_RE.fullmatch(symbol) if isinstance(symbol, str) else None
+    if match is None:
+        raise LongbridgeError(f"unrecognized option symbol: {symbol!r}")
+    _, encoded_date, marker, encoded_strike = match.groups()
+    try:
+        encoded_expiry = date(2000 + int(encoded_date[:2]), int(encoded_date[2:4]), int(encoded_date[4:]))
+        quoted_strike = Decimal(str(strike))
+    except (ValueError, InvalidOperation) as exc:
+        raise LongbridgeError(f"invalid option identity: {symbol!r}") from exc
+    # Compare before float conversion: rounding must not hide a different contract.
+    if (not quoted_strike.is_finite() or quoted_strike <= 0
+            or quoted_strike != Decimal(encoded_strike) / 1000 or expiry != encoded_expiry):
+        raise LongbridgeError(f"option quote identity mismatch: {symbol!r} (strike or expiry)")
+    return "call" if marker == "C" else "put"
+
+
 @dataclass
 class OptionQuoteRow:
     symbol: str
@@ -65,6 +85,7 @@ class OptionQuoteRow:
     volume: int
     trade_status: str
     contract_multiplier: float
+    option_side: str = "put"
 
 
 @dataclass
@@ -261,21 +282,26 @@ class LongbridgeClient:
         dates = self._call("option_chain_expiry_date_list", lambda: ctx.option_chain_expiry_date_list(symbol), cancel)
         return sorted(dates)
 
-    def put_strikes(self, symbol: str, expiry: date, lo_strike: float, hi_strike: float,
-                    cancel: Optional[threading.Event] = None) -> List[Tuple[float, str]]:
-        """(strike, put_symbol) pairs for standard contracts within the strike band, ascending by strike."""
+    def option_strikes(self, symbol: str, expiry: date, lo_strike: float, hi_strike: float, option_side: str = "put",
+                       cancel: Optional[threading.Event] = None) -> List[Tuple[float, str]]:
         ctx = self._context()
         rows = self._call("option_chain_info_by_date", lambda: ctx.option_chain_info_by_date(symbol, expiry), cancel)
+        attr = "call_symbol" if option_side == "call" else "put_symbol"
         out: List[Tuple[float, str]] = []
         for row in rows:
-            if not getattr(row, "standard", True) or not row.put_symbol:
+            contract = getattr(row, attr, None)
+            if not getattr(row, "standard", True) or not contract:
                 continue
             strike = _f(row.price)
             if strike is None or strike < lo_strike or strike > hi_strike:
                 continue
-            out.append((strike, row.put_symbol))
+            out.append((strike, contract))
         out.sort(key=lambda p: p[0])
         return out
+
+    def put_strikes(self, symbol: str, expiry: date, lo_strike: float, hi_strike: float,
+                    cancel: Optional[threading.Event] = None) -> List[Tuple[float, str]]:
+        return self.option_strikes(symbol, expiry, lo_strike, hi_strike, "put", cancel)
 
     def option_quotes(self, symbols: Sequence[str], cancel: Optional[threading.Event] = None,
                       progress: Optional[Callable[[int, int], None]] = None) -> List[OptionQuoteRow]:
@@ -287,20 +313,19 @@ class LongbridgeClient:
             self._wait_for_option_budget(len(batch), cancel)
             quotes = self._call("option_quote", lambda b=batch: ctx.option_quote(b), cancel)
             for q in quotes:
-                strike = _f(q.strike_price)
-                if strike is None:
-                    continue
+                option_side = _verified_option_side(q.symbol, q.expiry_date, q.strike_price)
                 rows.append(OptionQuoteRow(
                     symbol=q.symbol,
                     underlying=str(q.underlying_symbol),
                     expiry=q.expiry_date,
-                    strike=strike,
+                    strike=float(q.strike_price),
                     last=_f(q.last_done),
                     iv=normalize_iv(q.implied_volatility),
                     open_interest=int(q.open_interest or 0),
                     volume=int(q.volume or 0),
                     trade_status=str(q.trade_status),
                     contract_multiplier=_f(q.contract_multiplier) or 100.0,
+                    option_side=option_side,
                 ))
             if progress:
                 progress(idx + 1, len(batches))

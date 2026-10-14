@@ -35,6 +35,14 @@ class Scenario:
 
 SCENARIOS: List[Scenario] = [
     Scenario(
+        key="buy_cheap_calls",
+        title="Buy Cheap Calls / LEAPS",
+        stance="long_call",
+        action="Buy 90-730 DTE calls at 15-85 delta. Use the delta range to target OTM, ATM, or ITM exposure.",
+        description="VIX, IV rank and put skew are all low: long-dated upside exposure is comparatively cheap.",
+        target=(0, 0, 0),
+    ),
+    Scenario(
         key="buy_puts",
         title="Buy Puts (cheap protection)",
         stance="long_vol",
@@ -262,7 +270,7 @@ def classify_regime(m: MarketMetrics) -> RegimeResult:
 
     ranked = []
     for scenario in SCENARIOS:
-        if scenario.target is None:
+        if scenario.target is None or (scenario.key == "buy_cheap_calls" and levels != (0, 0, 0)):
             continue
         distance = _distance(levels, scenario.target)
         temperature_gap = abs(sum(levels) - sum(scenario.target))

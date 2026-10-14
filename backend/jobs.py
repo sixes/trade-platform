@@ -405,7 +405,11 @@ class ScanService:
 
         scenario_key = job.scenario_override or regime.scenario
         scenario = SCENARIO_BY_KEY[scenario_key]
-        scenario_cfg = job.filters or self.settings.section(f"scenarios.{scenario_key}")
+        defaults = self.settings.section(f"scenarios.{scenario_key}")
+        option_side = str(defaults.get("option_side", "put")).lower()
+        # Custom restrictions replace defaults, but contract side belongs to the scenario.
+        scenario_cfg = dict(job.filters if job.filters is not None else defaults)
+        scenario_cfg["option_side"] = option_side
         today = market_today()
         warnings: List[str] = []
         underlyings: List[dict] = []
@@ -438,8 +442,9 @@ class ScanService:
                 "stance": scenario.stance,
                 "action": scenario.action,
                 "description": scenario.description,
+                "option_side": option_side,
                 "filters": scenario_cfg,
-                "filters_source": "custom" if job.filters else "default",
+                "filters_source": "custom" if job.filters is not None else "default",
             },
             "regime": regime.to_dict(),
             "market": metrics.to_dict(),
@@ -463,6 +468,7 @@ class ScanService:
         max_strikes = int(lb_cfg.get("max_strikes_per_expiry", 30))
         depth_top_n = int(lb_cfg.get("depth_top_n", 12))
         max_results = int(scenario_cfg.get("max_results", 12))
+        option_side = scenario_cfg["option_side"]
         dte_lo, dte_hi = scenario_cfg.get("dte", [30, 45])
         delta_lo, delta_hi = scenario_cfg.get("delta", [0.1, 0.3])
         warnings: List[str] = []
@@ -488,10 +494,12 @@ class ScanService:
         if not reference.get("atm_iv"):
             warnings.append("ATM implied volatility unavailable; using the fallback strike band")
 
+        scenario_chains: Dict[date, list] = chains if option_side == "put" else {}
+
         def chain(expiry: date) -> list:
-            if expiry not in chains:
-                chains[expiry] = self.client.put_strikes(symbol, expiry, 0.0, float("inf"), cancel)
-            return chains[expiry]
+            if expiry not in scenario_chains:
+                scenario_chains[expiry] = self.client.option_strikes(symbol, expiry, 0.0, float("inf"), option_side, cancel)
+            return scenario_chains[expiry]
 
         # Phase 2: only the strikes that can hold the scenario's delta range, on a few expiries.
         quoted = {row.symbol for row in rows}
@@ -500,7 +508,7 @@ class ScanService:
             job.update(phase=f"{symbol}: loading option chain", message=f"expiry {expiry.isoformat()} ({k + 1}/{len(scenario_expiries)})",
                        progress=base + span * (0.22 + 0.16 * (k + 1) / len(scenario_expiries)))
             dte = (expiry - today).days
-            lo, hi = strike_band_for_deltas(spot, delta_lo, delta_hi, dte, reference.get("atm_iv"), reference.get("skew_ratio"), r, q, fallback_band)
+            lo, hi = strike_band_for_deltas(spot, delta_lo, delta_hi, dte, reference.get("atm_iv"), reference.get("skew_ratio"), r, q, fallback_band, option_side)
             full_chain = chain(expiry)
             pairs = subsample_strikes([p for p in full_chain if lo <= p[0] <= hi], max_strikes)
             # Two strikes bracketing spot give this expiry its own ATM IV, so IV/ATM is not distorted by term structure.
@@ -517,9 +525,9 @@ class ScanService:
         if wanted:
             job.update(phase=f"{symbol}: fetching option quotes", message=f"{len(wanted)} contracts", progress=base + span * 0.40)
             rows = rows + self.client.option_quotes(wanted, cancel, on_batch)
-        candidates, skipped = build_candidates(rows, spot, today, r, q)
+        candidates, skipped = build_candidates(rows, spot, today, r, q, option_side)
         if skipped.get("no_iv"):
-            warnings.append(f"{skipped['no_iv']} puts had no implied volatility and were skipped")
+            warnings.append(f"{skipped['no_iv']} {option_side}s had no implied volatility and were skipped")
         atm_by_expiry = atm_iv_by_expiry(candidates)
 
         filtered = filter_candidates(candidates, scenario_cfg, reference.get("atm_iv"), atm_by_expiry=atm_by_expiry)
@@ -550,8 +558,10 @@ class ScanService:
             "atm_iv_by_expiry": {k: round(v, 5) for k, v in atm_by_expiry.items()},
             "iv_rank": iv_rank_info,
             "expiries": [e.isoformat() for e in scenario_expiries],
+            "option_side": option_side,
             "stats": {
-                "puts_quoted": len(rows),
+                "contracts_quoted": len(rows),
+                "puts_quoted": len(rows) if option_side == "put" else 0,
                 "with_greeks": len(candidates),
                 "after_filters": len(filtered),
                 "skipped": skipped,

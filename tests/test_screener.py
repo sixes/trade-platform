@@ -1,7 +1,11 @@
+from copy import deepcopy
+from dataclasses import replace
 from datetime import date
+from unittest.mock import Mock
 
 import pytest
 
+import backend.analytics.screener as screener
 from backend.analytics.screener import (
     apply_depth,
     atm_iv_by_expiry,
@@ -18,7 +22,7 @@ TODAY = date(2026, 9, 23)
 
 
 def chain_candidates(fake: FakeLongbridge):
-    rows = list(fake._rows.values())
+    rows = [row for row in fake._rows.values() if row.option_side == "put"]
     cands, skipped = build_candidates(rows, fake.spot_price, TODAY, R, Q)
     return cands, skipped
 
@@ -35,6 +39,56 @@ def test_build_candidates_computes_greeks_and_yields():
     assert abs(c.annualized_yield_pct - c.premium_yield_pct * 365 / 38) < 1e-9
     assert c.breakeven == 450.0 - c.price
     assert c.theta_per_day < 0
+
+
+def test_call_candidates_cover_moneyness_and_compute_cheapness_metrics():
+    fake = FakeLongbridge(today=TODAY)
+    rows = [row for row in fake._rows.values() if row.option_side == "call"]
+    cands, skipped = build_candidates(rows, fake.spot_price, TODAY, R, Q, "call")
+    cfg = SETTINGS.section("scenarios.buy_cheap_calls")
+    filtered = filter_candidates(cands, cfg, atm_iv=0.18, atm_by_expiry=atm_iv_by_expiry(cands))
+    assert filtered and skipped["expired"] == 0
+    assert {c.moneyness for c in filtered} >= {"ITM", "ATM", "OTM"}
+    assert all(c.option_side == "call" and 0 < c.delta < 1 for c in filtered)
+    assert all(c.contract_premium == pytest.approx(c.price * 100) for c in filtered)
+    assert all(c.extrinsic_value is not None and c.extrinsic_cost_per_delta_pct is not None for c in filtered)
+    ranked = score_candidates(filtered, "buy_cheap_calls", cfg["max_spread_pct"])
+    assert ranked and [c.score for c in ranked] == sorted((c.score for c in ranked), reverse=True)
+
+
+@pytest.mark.parametrize("side", ["call", "put"])
+def test_mixed_rows_keep_verified_side_before_greeks_atm_and_scoring(monkeypatch, side):
+    fake = FakeLongbridge(today=TODAY)
+    rows = [replace(row, iv=0.12 if row.option_side == "call" else 0.36)
+            for row in fake._rows.values()
+            if (row.expiry - TODAY).days == 31 and row.strike in (495, 500, 505)]
+    expected = [row for row in rows if row.option_side == side]
+    # Invalid identity must be excluded even before looking at expiry or IV.
+    rows += [replace(rows[0], option_side=invalid, expiry=None, iv=None)
+             for invalid in (None, "", "CALL", "unknown")]
+    original = deepcopy(rows)
+    spies = {}
+    for name in ("call_delta", "put_delta", "call_theta_per_day", "put_theta_per_day"):
+        spies[name] = Mock(wraps=getattr(screener, name))
+        monkeypatch.setattr(screener, name, spies[name])
+
+    cands, skipped = build_candidates(rows, fake.spot_price, TODAY, R, Q, side)
+    other = "put" if side == "call" else "call"
+    assert spies[f"{side}_delta"].call_count == spies[f"{side}_theta_per_day"].call_count == 3
+    assert spies[f"{other}_delta"].call_count == spies[f"{other}_theta_per_day"].call_count == 0
+    assert skipped == {"expired": 0, "no_iv": 0, "no_delta": 0, "bad_status": 0,
+                       "wrong_side": 3, "invalid_side": 4}
+    assert [c.symbol for c in cands] == [row.symbol for row in expected]
+    assert all(c.option_side == side and (c.delta > 0) == (side == "call") for c in cands)
+    assert atm_iv_by_expiry(cands) == {expected[0].expiry.isoformat(): expected[0].iv}
+
+    cfg = {"dte": [30, 32], "delta": [0, 1]}
+    scenario = "buy_cheap_calls" if side == "call" else "buy_puts"
+    ranked = score_candidates(filter_candidates(cands, cfg, expected[0].iv), scenario)
+    clean, _ = build_candidates(expected, fake.spot_price, TODAY, R, Q, side)
+    clean_ranked = score_candidates(filter_candidates(clean, cfg, expected[0].iv), scenario)
+    assert ranked and [c.to_dict() for c in ranked] == [c.to_dict() for c in clean_ranked]
+    assert rows == original
 
 
 def test_reference_metrics_picks_expiry_near_30_dte_and_measures_skew():

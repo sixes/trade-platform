@@ -2,7 +2,7 @@
 from datetime import date, timedelta
 from typing import Dict, List, Optional
 
-from backend.analytics.greeks import put_price
+from backend.analytics.greeks import call_price, put_price
 from backend.config import load_settings
 from backend.market_data.longbridge import DepthRow, OptionQuoteRow
 from backend.market_data.ratelimit import QuotaState
@@ -26,7 +26,7 @@ class FakeLongbridge:
         self.quota = QuotaState()
         self.calls: List[str] = []
         self.option_contracts_quoted = 0
-        self.expiries = [self.today + timedelta(days=d) for d in (7, 14, 21, 31, 38, 45, 59, 73, 94, 122, 185)]
+        self.expiries = [self.today + timedelta(days=d) for d in (7, 14, 21, 31, 38, 45, 59, 73, 94, 122, 185, 365, 540, 720)]
         self._rows: Dict[str, OptionQuoteRow] = {}
         for expiry in self.expiries:
             strike = 250.0
@@ -39,7 +39,16 @@ class FakeLongbridge:
                     symbol=sym, underlying="SPY.US", expiry=expiry, strike=strike,
                     last=round(price, 2) if price and price > 0.01 else None, iv=iv,
                     open_interest=int(200 + (strike % 50) * 40), volume=int(strike % 7) * 10,
-                    trade_status="TradeStatus.Normal", contract_multiplier=100.0,
+                    trade_status="TradeStatus.Normal", contract_multiplier=100.0, option_side="put",
+                )
+                call_sym = f"SPY{expiry.strftime('%y%m%d')}C{int(strike * 1000):08d}.US"
+                call_iv = atm_iv * (1 + 0.25 * abs(strike / spot - 1))
+                call = call_price(spot, strike, dte / 365.0, call_iv, R, Q)
+                self._rows[call_sym] = OptionQuoteRow(
+                    symbol=call_sym, underlying="SPY.US", expiry=expiry, strike=strike,
+                    last=round(call, 2) if call and call > 0.01 else None, iv=call_iv,
+                    open_interest=int(200 + (strike % 50) * 40), volume=int(strike % 7) * 10,
+                    trade_status="TradeStatus.Normal", contract_multiplier=100.0, option_side="call",
                 )
                 strike += 5.0
 
@@ -56,9 +65,12 @@ class FakeLongbridge:
         self._record("option_chain_expiry_date_list")
         return list(self.expiries)
 
-    def put_strikes(self, symbol, expiry, lo, hi, cancel=None):
+    def option_strikes(self, symbol, expiry, lo, hi, option_side="put", cancel=None):
         self._record("option_chain_info_by_date")
-        return sorted((r.strike, s) for s, r in self._rows.items() if r.expiry == expiry and lo <= r.strike <= hi)
+        return sorted((r.strike, s) for s, r in self._rows.items() if r.expiry == expiry and r.option_side == option_side and lo <= r.strike <= hi)
+
+    def put_strikes(self, symbol, expiry, lo, hi, cancel=None):
+        return self.option_strikes(symbol, expiry, lo, hi, "put", cancel)
 
     def option_quotes(self, symbols, cancel=None, progress=None):
         batches = [symbols[i:i + 100] for i in range(0, len(symbols), 100)]

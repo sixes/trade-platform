@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from backend.analytics.greeks import put_delta, strike_for_put_delta
+from backend.analytics.greeks import call_delta, strike_for_call_delta, put_delta, strike_for_put_delta
 from backend.analytics.screener import strike_band_for_deltas, subsample_strikes
 from backend.jobs import ScanService
 from backend.market_data.ratelimit import SlidingWindowBudget
@@ -17,6 +17,16 @@ def test_strike_for_put_delta_round_trips():
         assert abs(put_delta(spot, strike, t, sigma, r, q)) == pytest.approx(target, abs=1e-6)
     assert strike_for_put_delta(spot, 0, t, sigma) is None
     assert strike_for_put_delta(spot, 0.2, 0, sigma) is None
+
+
+def test_strike_for_call_delta_and_band_round_trip():
+    spot, t, sigma, r, q = 500.0, 365 / 365, 0.22, 0.04, 0.012
+    strikes = [strike_for_call_delta(spot, target, t, sigma, r, q) for target in (0.15, 0.5, 0.85)]
+    assert strikes[0] > strikes[1] > strikes[2]
+    for target, strike in zip((0.15, 0.5, 0.85), strikes):
+        assert call_delta(spot, strike, t, sigma, r, q) == pytest.approx(target, abs=1e-6)
+    lo, hi = strike_band_for_deltas(spot, 0.15, 0.85, 365, sigma, None, r, q, option_side="call")
+    assert lo < spot < hi and lo <= strikes[2] and hi >= strikes[0]
 
 
 def test_strike_band_contains_target_deltas_under_skew():

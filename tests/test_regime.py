@@ -18,10 +18,11 @@ def regime_for(vix_range, vix_tail, skew_range, skew_tail):
     return metrics, classify_regime(metrics)
 
 
-def test_all_low_is_buy_puts():
+def test_all_low_is_buy_cheap_calls():
     metrics, regime = regime_for((12, 35), [14, 14], (118, 122), [118, 118])
     assert metrics.vix.level == "LOW" and metrics.iv_rank_level == "LOW" and metrics.skew.level == "LOW"
-    assert regime.scenario == "buy_puts" and regime.exact_match
+    assert regime.scenario == "buy_cheap_calls" and regime.exact_match
+    assert "buy_puts" in SCENARIO_BY_KEY
 
 
 def test_low_vix_high_rank_high_skew_is_selective_selling():

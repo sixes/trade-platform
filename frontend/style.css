@@ -100,11 +100,22 @@ main > *, .grid-3 > * { min-width: 0; }
 
 /* Live chart sections (rates/credit/dollar, commodities): three larger charts per row */
 #live-sections { display: grid; gap: 16px; }
+#live-sections > * { min-width: 0; }
 .macro-head { flex-wrap: wrap; row-gap: 6px; }
 .macro-head .live-status { margin-left: 0; }
 .macro-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 @media (max-width: 1100px) { .macro-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 700px) { .macro-grid { grid-template-columns: 1fr; } }
+@media (max-width: 700px) {
+  .macro-grid { grid-template-columns: minmax(0, 1fr); }
+  .macro-head h2 { white-space: normal; }
+  .macro-card .mini-head { flex-wrap: wrap; }
+  .symbol-editor { min-width: 0; max-width: 100%; }
+  .symbol-editor input { max-width: 100%; }
+  .topbar { position: static; }
+  .topbar, .topbar-right { flex-wrap: wrap; }
+  .topbar-right { min-width: 0; max-width: 100%; }
+  .pill { flex-wrap: wrap; white-space: normal; max-width: 100%; }
+}
 .macro-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; min-width: 0; }
 .macro-card .mini-head b { font-size: 15px; }
 .macro-stats { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; margin: 6px 0 8px; font-variant-numeric: tabular-nums; }

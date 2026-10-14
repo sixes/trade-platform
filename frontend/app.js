@@ -118,6 +118,11 @@
   const SYMBOL_RE = /^[A-Z0-9][A-Z0-9.\-]{0,14}$/;
   // Series keys can hold dots (e.g. 700.HK); DOM ids and selectors need something safer.
   const domKey = (name) => String(name).replace(/[^A-Za-z0-9_-]/g, "_");
+  const isSessionStock = (ctl, name, range) => Array.isArray(ctl.symbols) && range === "1d" && (!name.includes(".") || name.endsWith(".US"));
+
+  function clearSeriesChart(key) {
+    if (state.charts[key]) { state.charts[key].destroy(); delete state.charts[key]; }
+  }
 
   function buildLiveSections(sections, defaultRange) {
     const host = $("#live-sections");
@@ -207,15 +212,26 @@
   async function loadLiveSection(ctl) {
     if (ctl.inflight) { ctl.rerun = true; return; }
     ctl.inflight = true;
-    ctl.card.querySelectorAll(".range-buttons button").forEach((b) => b.classList.toggle("active", b.dataset.range === sectionRange(ctl)));
+    const requestedRange = sectionRange(ctl);
+    ctl.card.querySelectorAll(".range-buttons button").forEach((b) => b.classList.toggle("active", b.dataset.range === requestedRange));
     try {
       const variantParam = Object.entries(ctl.variants).map(([k, v]) => `${k}:${v}`).join(",");
       const symbolParam = Array.isArray(ctl.symbols) ? `&symbols=${encodeURIComponent(ctl.symbols.join(","))}` : "";
-      const data = await api(`/api/macro?section=${encodeURIComponent(ctl.id)}&range=${encodeURIComponent(sectionRange(ctl))}${variantParam ? `&variants=${encodeURIComponent(variantParam)}` : ""}${symbolParam}`);
+      const data = await api(`/api/macro?section=${encodeURIComponent(ctl.id)}&range=${encodeURIComponent(requestedRange)}${variantParam ? `&variants=${encodeURIComponent(variantParam)}` : ""}${symbolParam}`);
       ctl.data = data;
       (ctl.render || renderLiveSection)(ctl, data);
       scheduleLiveRefresh(ctl, ((data.refresh_seconds || data.live_ttl_seconds || 55) * 1000) + 300);
     } catch (err) {
+      // A failed poll must not leave a regular-session stock chart looking live.
+      Object.keys(state.charts).filter((key) => key.startsWith(`live:${ctl.id}:`)).forEach((key) => {
+        const name = key.slice(`live:${ctl.id}:`.length);
+        if (!state.charts[key].$stockSession && !isSessionStock(ctl, name, requestedRange)) return;
+        clearSeriesChart(key);
+        const stats = document.getElementById(`live-${ctl.id}-stats-${domKey(name)}`);
+        if (stats) stats.innerHTML = '<span class="sub">chart unavailable - update failed</span>';
+        const badge = document.getElementById(`live-${ctl.id}-badge-${domKey(name)}`);
+        if (badge) { badge.className = "live-badge off"; badge.textContent = "UNAVAILABLE"; }
+      });
       ctl.card.querySelector(".live-status").textContent = `update failed: ${err.message}`;
       scheduleLiveRefresh(ctl, 30000);
     } finally {
@@ -267,6 +283,9 @@
       const m = entry.metrics || {};
       const unit = entry.unit || "index";
       const id = domKey(name);
+      const chartKey = `live:${sid}:${name}`;
+      const scopedStock = isSessionStock(ctl, name, data.range) || (editable && data.range === "1d" && "session" in entry);
+      const clearStaleStock = scopedStock || !!state.charts[chartKey]?.$stockSession;
       $(`#live-${sid}-label-${id}`).textContent = entry.label || "";
       const variantHost = $(`#live-${sid}-variants-${id}`);
       const variants = entry.variants || [];
@@ -281,16 +300,21 @@
         variantHost.innerHTML = "";
       }
       const badge = $(`#live-${sid}-badge-${id}`);
+      const historyOnly = scopedStock && entry.intraday && entry.session?.date && !m.live;
       badge.className = `live-badge ${m.live ? "" : "off"}`;
-      badge.innerHTML = m.live ? `<span class="dot"></span>LIVE` : "DAILY";
-      badge.title = m.live ? `${entry.live_source} - as of ${m.as_of}` : (entry.live_note || "");
+      badge.innerHTML = m.live ? `<span class="dot"></span>LIVE` : historyOnly ? "HISTORY" : "DAILY";
+      badge.title = m.live ? `${entry.live_source} - as of ${m.as_of}`
+        : historyOnly ? "Intraday session history; live quote unavailable" : (entry.live_note || "");
       if (entry.error) {
+        if (clearStaleStock) clearSeriesChart(chartKey);
         $(`#live-${sid}-stats-${id}`).innerHTML = `<span class="sub">unavailable - no daily history or live quote from ${esc((entry.live_source || entry.daily_source || "any source"))}${editable ? "; check the ticker" : ""}</span>`;
         return;
       }
       const chg = m.change;
       const rangeNote = entry.fallback ? `<span class="sub">no intraday feed - showing 1M daily</span>` : "";
       const note = entry.note ? `<span class="sub note" title="${esc(entry.note)}">Note: ${esc(entry.note)}</span>` : "";
+      const sessionNote = scopedStock && entry.intraday && entry.session?.date
+        ? `<span class="sub">Session ${esc(entry.session.date)} · ET</span>${entry.chart_source && entry.chart_source !== entry.live_source ? `<span class="sub">chart: ${esc(entry.chart_source)}</span>` : ""}` : "";
       $(`#live-${sid}-stats-${id}`).innerHTML = `
         <span class="value">${fmtValue(m.value, unit)}</span>
         <span class="chg ${chg > 0 ? "gain" : chg < 0 ? "loss" : ""}">${fmtChange(chg, unit, m.value)}${unit !== "usd" && m.change_pct != null ? ` (${signed(m.change_pct, 2)}%)` : ""}</span>
@@ -298,11 +322,18 @@
         <span class="sub">52w ${fmtRange(m.low_52w, m.high_52w, unit)}</span>
         <span class="sub">pctl ${num(m.percentile, 0)}</span>
         <span class="sub" title="${esc(entry.daily_source || "")}">${esc(String(entry.live_source || entry.daily_source || "").split(":")[0])}</span>
-        ${rangeNote}${note}`;
+        ${sessionNote}${rangeNote}${note}`;
       if (typeof Chart !== "undefined" && entry.chart_series && entry.chart_series.length) {
-        drawOverlayChart(`live:${sid}:${name}`, `#live-${sid}-chart-${id}`, entry.chart_series, entry.intraday ? data.range : "daily");
+        drawOverlayChart(chartKey, `#live-${sid}-chart-${id}`, entry.chart_series, entry.intraday ? data.range : "daily");
+      } else if (clearStaleStock && (!entry.series || !entry.series.length)) {
+        clearSeriesChart(chartKey);
+        $(`#live-${sid}-stats-${id}`).insertAdjacentHTML("beforeend", '<span class="sub">chart unavailable - no bars</span>');
       } else if (typeof Chart !== "undefined" && entry.series && entry.series.length) {
-        drawSeriesChart(`live:${sid}:${name}`, `#live-${sid}-chart-${id}`, entry.series, LIVE_PALETTE[i % LIVE_PALETTE.length], entry.intraday ? data.range : "daily", unit, name);
+        const session = scopedStock && entry.intraday ? (entry.session || null) : undefined;
+        const drawn = drawSeriesChart(chartKey, `#live-${sid}-chart-${id}`, entry.series, LIVE_PALETTE[i % LIVE_PALETTE.length], entry.intraday ? data.range : "daily", unit, name, undefined, session);
+        if (drawn === false && scopedStock) {
+          $(`#live-${sid}-stats-${id}`).insertAdjacentHTML("beforeend", `<span class="sub">chart unavailable - ${esc(entry.session_note || "no usable regular-session timestamps/bars")}</span>`);
+        }
       }
     });
     const curve = data.curve || {};
@@ -426,48 +457,94 @@
     });
   }
 
-  // Line chart for a series of {t, v} points; updates in place so live refreshes do not flicker.
-  function drawSeriesChart(key, selector, series, color, range, unit, name, thresholds) {
-    const labels = series.map((p) => timeLabel(p.t, range));
-    const values = series.map((p) => p.v);
-    const guides = (thresholds || []).map(([value, label]) => ({ label, data: labels.map(() => value), borderColor: "#5b6b7e", borderDash: [4, 4], borderWidth: 1, pointRadius: 0, pointHitRadius: 0, fill: false, order: 2 }));
+  // Undefined session preserves category charts; null means the session is unavailable.
+  function drawSeriesChart(key, selector, series, color, range, unit, name, thresholds, session) {
+    const fixedSession = range === "1d" && session !== undefined;
+    let points = series, start, end, sessionTime, sessionStamp;
+    if (fixedSession) {
+      try {
+        // Never let Date.parse interpret a naive timestamp in the browser's timezone.
+        const timestamp = (t) => typeof t === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/.test(t) ? Date.parse(t) : NaN;
+        if (!session || session.timezone !== "America/New_York") throw new Error("unknown session timezone");
+        start = timestamp(session.start);
+        end = timestamp(session.end);
+        sessionTime = new Intl.DateTimeFormat("en-GB", { timeZone: session.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+        sessionStamp = new Intl.DateTimeFormat("en-US", { timeZone: session.timezone, year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short" });
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end - start !== 390 * 60000 || sessionTime.format(start) !== "09:30" || sessionTime.format(end) !== "16:00") throw new Error("invalid session bounds");
+        points = series.map((p) => ({ ...p, x: timestamp(p.t) }));
+        if (points.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.v))) throw new Error("invalid bar");
+        // Only real regular-session bars participate in drawing, tooltips and crosshairs.
+        points = points.filter((p) => p.x >= start && p.x <= end).sort((a, b) => a.x - b.x);
+        if (!points.length) throw new Error("no regular-session bars");
+      } catch (err) {
+        clearSeriesChart(key);
+        return false;
+      }
+    }
+    const labels = fixedSession ? [] : points.map((p) => timeLabel(p.t, range));
+    const values = fixedSession ? points.map((p) => ({ x: p.x, y: p.v })) : points.map((p) => p.v);
+    const guides = (thresholds || []).map(([value, label]) => ({ label, data: fixedSession ? points.map((p) => ({ x: p.x, y: value })) : labels.map(() => value), borderColor: "#5b6b7e", borderDash: [4, 4], borderWidth: 1, pointRadius: 0, pointHitRadius: 0, fill: false, order: 2 }));
+    const xScale = { type: "category", ticks: { color: "#8b98a8", maxTicksLimit: 6, maxRotation: 0, font: { size: 10 } }, grid: { color: "#1f2a37" } };
+    if (fixedSession) {
+      Object.assign(xScale, {
+        type: "linear", min: start, max: end, bounds: "ticks", offset: false,
+        title: { display: true, text: "ET · America/New_York", color: "#8b98a8", font: { size: 10 } },
+        afterBuildTicks: (scale) => {
+          // Keep both endpoints even on a 320px phone; add interior ticks only when they fit.
+          const minutes = scale.width >= 420 ? [90, 210, 330] : scale.width >= 260 ? [180] : [];
+          scale.ticks = [start, ...minutes.map((m) => start + m * 60000), end].map((value) => ({ value }));
+        },
+      });
+      Object.assign(xScale.ticks, { autoSkip: false, includeBounds: true, align: "inner", callback: (v) => sessionTime.format(v) });
+    }
+    const data = { labels, datasets: [{ label: name || key, data: values, borderColor: color, backgroundColor: color + "22", borderWidth: 1.5, pointRadius: fixedSession && points.length === 1 ? 3 : 0, pointHitRadius: 12, tension: 0.1, fill: true, order: 1 }, ...guides] };
+    const options = {
+      animation: false, responsive: true, maintainAspectRatio: false, parsing: !fixedSession,
+      interaction: fixedSession ? { mode: "nearest", axis: "x", intersect: false } : { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        crosshair: { format: (v) => fmtPrecise(v, unit) },
+        tooltip: {
+          filter: (item) => item.datasetIndex === 0,
+          callbacks: {
+            title: (items) => {
+              const item = items[0];
+              if (!item) return "";
+              if (fixedSession) return sessionStamp.format(item.parsed.x);
+              const point = item.chart.$series && item.chart.$series[item.dataIndex];
+              return point ? String(point.t).replace("T", " ").replace(/[-+]\d\d:\d\d$/, "") : "";
+            },
+            label: (ctx) => `${ctx.dataset.label}: ${fmtPrecise(ctx.parsed.y, unit)}`,
+          },
+        },
+      },
+      scales: {
+        x: xScale,
+        y: { ticks: { color: "#8b98a8", maxTicksLimit: 5, font: { size: 10 } }, grid: { color: "#1f2a37" } },
+      },
+    };
     const existing = state.charts[key];
     if (existing) {
-      existing.data.labels = labels;
-      existing.data.datasets[0].data = values;
-      guides.forEach((g, i) => { if (existing.data.datasets[i + 1]) existing.data.datasets[i + 1].data = g.data; });
-      existing.$series = series;
+      // Replace representation AND options: no old bounds, parsing, callbacks or dot survive a switch.
+      existing.data = data;
+      existing.options = options;
+      existing.$series = points;
+      if (fixedSession || existing.$stockSession) {
+        existing.$crosshair = null;
+        existing.setActiveElements([]);
+        if (existing.tooltip) existing.tooltip.setActiveElements([], { x: 0, y: 0 });
+      }
+      existing.$stockSession = fixedSession;
       existing.update("none");
-      return;
+      return true;
     }
     const canvas = $(selector);
     if (!canvas) return;
-    const chart = new Chart(canvas, {
-      type: "line",
-      plugins: [crosshairPlugin],
-      data: { labels, datasets: [{ label: name || key, data: values, borderColor: color, backgroundColor: color + "22", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 12, tension: 0.1, fill: true, order: 1 }, ...guides] },
-      options: {
-        animation: false, responsive: true, maintainAspectRatio: false,
-        interaction: { mode: "index", intersect: false },
-        plugins: {
-          legend: { display: false },
-          crosshair: { format: (v) => fmtPrecise(v, unit) },
-          tooltip: {
-            filter: (item) => item.datasetIndex === 0,
-            callbacks: {
-              title: (items) => (items[0] && chart.$series ? String(chart.$series[items[0].dataIndex].t).replace("T", " ").replace(/[-+]\d\d:\d\d$/, "") : ""),
-              label: (ctx) => `${ctx.dataset.label}: ${fmtPrecise(ctx.parsed.y, unit)}`,
-            },
-          },
-        },
-        scales: {
-          x: { ticks: { color: "#8b98a8", maxTicksLimit: 6, maxRotation: 0, font: { size: 10 } }, grid: { color: "#1f2a37" } },
-          y: { ticks: { color: "#8b98a8", maxTicksLimit: 5, font: { size: 10 } }, grid: { color: "#1f2a37" } },
-        },
-      },
-    });
-    chart.$series = series;
+    const chart = new Chart(canvas, { type: "line", plugins: [crosshairPlugin], data, options });
+    chart.$series = points;
+    chart.$stockSession = fixedSession;
     state.charts[key] = chart;
+    return true;
   }
 
   function renderIndexStats() {
@@ -684,7 +761,7 @@
     const values = stored ? Object.assign({}, defaults, stored) : defaults;
     writeFilterForm(values, defaults);
     const auto = !$("#scenario-select").value;
-    $("#filters-scenario").textContent = meta ? `- ${auto ? "auto: " : ""}${meta.title}` : "";
+    $("#filters-scenario").textContent = meta ? `- ${auto ? "auto: " : ""}${meta.title}${meta.option_side === "call" ? " · delta guide: OTM .15-.35, ATM .35-.65, ITM .65-.85" : ""}` : "";
     updateFilterState(values, defaults);
   }
 
@@ -868,6 +945,7 @@
     const tickers = (result.symbols || []).map(ticker).join(", ");
     $("#scan-meta").textContent = `last scan ${result.finished_at} - ${tickers} - ${result.api_calls} API calls in ${result.duration_seconds}s - ${sc.title} (${result.scenario_source})`;
     const longVol = sc.stance === "long_vol";
+    const optionSide = sc.option_side || "put";
     const custom = sc.filters_source === "custom";
     const head = `
       <div class="regime-action" style="margin-top:8px">
@@ -875,12 +953,12 @@
         <div class="muted small" style="margin-top:4px">${custom ? "custom filters" : "default filters"}: ${esc(filterSummary(sc.filters || {}))}</div>
       </div>
       ${(result.warnings || []).length ? `<div class="warnings">${result.warnings.map((w) => esc(ticker(w))).join("<br>")}</div>` : ""}`;
-    const blocks = (result.underlyings || []).map((u) => renderUnderlying(u, longVol)).join("");
+    const blocks = (result.underlyings || []).map((u) => renderUnderlying(u, longVol, optionSide)).join("");
     $("#results").innerHTML = head + blocks;
     setSummary("card-screener", `${sc.title} · ${tickers} · ${(result.underlyings || []).reduce((n, u) => n + (u.candidates || []).length, 0)} candidates`);
   }
 
-  function renderUnderlying(u, longVol) {
+  function renderUnderlying(u, longVol, optionSide) {
     if (u.error) {
       return `<div class="underlying"><div class="underlying-head"><h3>${esc(ticker(u.underlying))}</h3><span class="error-text">${esc(u.error)}</span></div></div>`;
     }
@@ -895,15 +973,17 @@
         <span class="metric">25d put IV <b>${ref.otm_put_iv == null ? "-" : num(ref.otm_put_iv * 100, 1) + "%"}</b></span>
         <span class="metric">chain skew <b>${num(ref.skew_ratio, 3)}</b> ${badge(ref.skew_level)}</span>
         <span class="metric">IV rank <b>${ivr.value == null ? "n/a" : num(ivr.value, 0)}</b> ${ivr.level ? badge(ivr.level) : ""} <span class="muted" title="${esc(ivr.note || "")}">${ivr.source ? `(${esc(ivr.source)})` : ""}</span></span>
-        <span class="metric muted">${u.stats?.puts_quoted} puts quoted, ${u.stats?.after_filters} passed filters</span>
+        <span class="metric muted">${u.stats?.contracts_quoted ?? u.stats?.puts_quoted} contracts quoted, ${u.stats?.after_filters} passed filters</span>
       </div>`;
     const warnings = [...(u.warnings || []), ivr.value == null ? ivr.note : null].filter(Boolean);
     if (!u.candidates || !u.candidates.length) {
-      return `<div class="underlying">${head}<div class="empty">No puts matched the scenario filters.</div>${warnings.length ? `<div class="warnings">${warnings.map(esc).join("<br>")}</div>` : ""}</div>`;
+      return `<div class="underlying">${head}<div class="empty">No ${esc(optionSide)}s matched the scenario filters.</div>${warnings.length ? `<div class="warnings">${warnings.map(esc).join("<br>")}</div>` : ""}</div>`;
     }
-    const valueCols = longVol
-      ? `<th>Cost % spot</th><th>Cost / delta</th><th>Theta/day</th>`
-      : `<th>Yield %</th><th>Annualized %</th><th>Cushion %</th>`;
+    const valueCols = optionSide === "call"
+      ? `<th>Contract $</th><th>Intrinsic</th><th>Extrinsic</th><th>Extrinsic / delta</th><th>Breakeven</th><th>Theta/day</th>`
+      : longVol
+        ? `<th>Cost % spot</th><th>Cost / delta</th><th>Theta/day</th>`
+        : `<th>Yield %</th><th>Annualized %</th><th>Cushion %</th>`;
     const rows = u.candidates.map((c) => `
       <tr>
         <td>${c.rank}</td>
@@ -911,16 +991,18 @@
         <td>${esc(c.expiry)}</td>
         <td>${c.dte}</td>
         <td>${num(c.strike)}</td>
-        <td>${num(c.moneyness_pct, 1)}%</td>
+        <td>${optionSide === "call" ? `${esc(c.moneyness)} ${num(c.moneyness_pct, 1)}%` : `${num(c.moneyness_pct, 1)}%`}</td>
         <td>${num(c.delta, 3)}</td>
         <td>${num(c.iv * 100, 1)}%</td>
         <td>${num(c.iv_ratio, 2)}</td>
         <td>${num(c.bid)}</td>
         <td>${num(c.ask)}</td>
         <td><b>${num(c.price)}</b></td>
-        ${longVol
-          ? `<td>${num(c.cost_pct_of_spot)}%</td><td>${num(c.cost_per_delta_pct)}</td><td>${num(c.theta_per_day, 3)}</td>`
-          : `<td>${num(c.premium_yield_pct)}%</td><td>${num(c.annualized_yield_pct, 1)}%</td><td>${num(c.cushion_pct, 1)}%</td>`}
+        ${optionSide === "call"
+          ? `<td>$${num(c.contract_premium, 0)}</td><td>${num(c.intrinsic_value)}</td><td>${num(c.extrinsic_value)}</td><td>${num(c.extrinsic_cost_per_delta_pct)}</td><td>${num(c.breakeven)} (${signed(c.breakeven_upside_pct, 1)}%)</td><td>${num(c.theta_per_day, 3)}</td>`
+          : longVol
+            ? `<td>${num(c.cost_pct_of_spot)}%</td><td>${num(c.cost_per_delta_pct)}</td><td>${num(c.theta_per_day, 3)}</td>`
+            : `<td>${num(c.premium_yield_pct)}%</td><td>${num(c.annualized_yield_pct, 1)}%</td><td>${num(c.cushion_pct, 1)}%</td>`}
         <td>${c.open_interest}</td>
         <td>${c.volume}</td>
         <td>${num(c.spread_pct, 1)}%</td>
@@ -932,7 +1014,7 @@
         <div class="table-wrap">
           <table>
             <thead><tr>
-              <th>#</th><th class="left">Contract</th><th>Expiry</th><th>DTE</th><th>Strike</th><th>OTM</th><th>Delta</th><th>IV</th><th>IV/ATM</th>
+              <th>#</th><th class="left">Contract</th><th>Expiry</th><th>DTE</th><th>Strike</th><th>Moneyness</th><th>Delta</th><th>IV</th><th>IV/ATM</th>
               <th>Bid</th><th>Ask</th><th>Price</th>${valueCols}<th>OI</th><th>Vol</th><th>Spread</th><th>Score</th><th class="left">Notes</th>
             </tr></thead>
             <tbody>${rows}</tbody>
