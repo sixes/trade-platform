@@ -71,6 +71,45 @@ def test_parse_yahoo_chart_dedups_live_bar_and_skips_nulls():
         parse_yahoo_chart({"chart": {"result": None, "error": {"code": "Not Found"}}})
 
 
+@pytest.mark.parametrize("key,symbol,offset", [
+    ("DAX", "^GDAXI", "+02:00"), ("FTSE100", "^FTSE", "+01:00"),
+    ("NIKKEI225", "^N225", "+09:00"), ("TAIEX", "^TWII", "+08:00"),
+    ("KOSPI", "^KS11", "+09:00"),
+])
+def test_yahoo_daily_timezone_flows_from_source_without_changing_utc_default(tmp_path, monkeypatch, key, symbol, offset):
+    payload = yahoo_stock_payload([
+        (f"2026-09-25T00:00{offset}", 42000), (f"2026-09-25T00:05{offset}", 42010),
+        (f"2026-09-26T00:00{offset}", 42020),
+    ])
+    urls = []
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return payload
+
+    class Http:
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def get(self, url):
+            urls.append(url)
+            return Response()
+
+    monkeypatch.setattr("backend.market_data.indices.httpx.Client", Http)
+    provider = IndexHistoryProvider(tmp_path)
+    section = next(s for s in SETTINGS.get("live_sections") if s["id"] == "global_equities")
+    spec = next(spec for spec in section["series"] if spec["key"] == key)
+    assert provider.series(key, spec["sources"]) == [("2026-09-25", 42010), ("2026-09-26", 42020)]
+    # The same timestamps still deduplicate by UTC date for existing, unscoped Yahoo sources.
+    assert provider.series("USDJPY", [{"type": "yahoo", "symbol": "JPY=X"}]) == [
+        ("2026-09-24", 42010), ("2026-09-25", 42020),
+    ]
+    assert urls == [
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=5y&interval=1d",
+        "https://query1.finance.yahoo.com/v8/finance/chart/JPY=X?range=5y&interval=1d",
+    ]
+
+
 def test_series_falls_back_across_sources_and_records_which_worked(tmp_path, monkeypatch):
     provider = IndexHistoryProvider(tmp_path, ttl_minutes=60)
     calls = []
@@ -121,7 +160,8 @@ class StubProvider:
                  "USDJPY": 152.3, "JYVIX_PROXY": 28.7, "JPVL_PROXY": 24.2, "G5_COLV_PROXY": 17.4,
                  "GOLD_SPOT": 4320.0, "GOLD_FUTURES": 4322.0, "GOLD_ETF": 392.9, "SILVER_SPOT": 64.0, "SILVER_FUTURES": 64.6, "SILVER_ETF": 58.2,
                  "BRENT_SPOT": 114.9, "BRENT_FUTURES": 97.5, "WTI_SPOT": 96.4, "WTI_FUTURES": 91.6, "COPPER": 6.77,
-                 "STOCKS_SOXL": 142.3, "STOCKS_TECL": 228.2, "STOCKS_UPRO": 148.8, "STOCKS_SPXL": 284.7, "STOCKS_NVDA": 190.5}
+                 "STOCKS_SOXL": 142.3, "STOCKS_TECL": 228.2, "STOCKS_UPRO": 148.8, "STOCKS_SPXL": 284.7, "STOCKS_NVDA": 190.5,
+                 "DAX": 25000.0, "FTSE100": 9500.0, "NIKKEI225": 42000.0, "TAIEX": 25000.0, "KOSPI": 3500.0}
         if key.upper() not in curve:
             return None
         self.source_used[key.lower()] = f"stub:{key.upper()}"
@@ -161,12 +201,19 @@ class FakeSina:
         raise RuntimeError("offline")
 
 
-def offline_macro(monkeypatch, live=None, sina=None):
-    """MacroService whose live fetchers are stubbed: `live` maps series key -> LiveData (or None)."""
+def offline_macro(monkeypatch, live=None, sina=None, *, daily=None):
+    """Stub live feeds by key; optional daily overrides include empty or missing components."""
     from backend.market_data.macro import MacroService
 
     service = MacroService(SETTINGS, StubProvider(), None, sina=sina or FakeSina())
     live = live or {}
+    if daily is not None:
+        original = service.indices.try_series
+
+        def fake_series(key, sources, fetch=None):
+            return daily[key] if key in daily else original(key, sources, fetch)
+
+        monkeypatch.setattr(service.indices, "try_series", fake_series)
 
     def fake_yahoo(symbol, range_key, **kwargs):
         for section in service.sections():
@@ -185,10 +232,13 @@ def offline_macro(monkeypatch, live=None, sina=None):
 
 def test_live_sections_are_declared_and_commodities_snapshot_works(monkeypatch):
     service = offline_macro(monkeypatch)
-    sections = service.sections()
-    assert [s["id"] for s in sections] == ["vix", "stocks", "macro", "japan_yields", "japan_fx", "us_jp_gaps", "commodities"]
-    assert sections[0]["hidden"] is True and sections[2]["hidden"] is False
-    assert sections[2]["curve"] is True and sections[3]["curve"] is False
+    sections = {s["id"]: s for s in service.sections()}
+    assert list(sections) == ["vix", "stocks", "global_equities", "macro", "japan_yields", "japan_fx", "us_jp_gaps", "commodities"]
+    assert sections["vix"]["hidden"] is True and sections["macro"]["hidden"] is False
+    assert sections["macro"]["curve"] is True and sections["japan_yields"]["curve"] is False
+    assert {key: s["chart_mode"] for key, s in sections.items() if s["chart_mode"] is not None} == {
+        "stocks": "percent_change", "global_equities": "percent_change",
+    }
     snap = service.snapshot("1d", "commodities")
     assert snap["section"]["title"] == "Commodities" and snap["curve"] == {}
     assert list(snap["items"]) == ["GOLD", "SILVER", "BRENT", "WTI", "COPPER"]
@@ -197,6 +247,26 @@ def test_live_sections_are_declared_and_commodities_snapshot_works(monkeypatch):
     assert gold["fallback"] == "daily"  # live feed offline in tests -> daily fallback
     with pytest.raises(KeyError):
         service.snapshot("1d", "nope")
+
+
+def test_global_equities_are_fixed_yahoo_indices_with_scoped_timezones(monkeypatch):
+    service = offline_macro(monkeypatch)
+    section = next(s for s in service.sections() if s["id"] == "global_equities")
+    assert section["title"] == "Global Equity Indices" and section["symbols"] is None
+    assert section["hidden"] is False and section["curve"] is False
+    specs = service.specs("global_equities")
+    expected = [("DAX", "DAX", "^GDAXI", "Europe/Berlin"), ("FTSE100", "FTSE 100", "^FTSE", "Europe/London"),
+                ("NIKKEI225", "Nikkei 225", "^N225", "Asia/Tokyo"), ("TAIEX", "Taiwan TAIEX", "^TWII", "Asia/Taipei"),
+                ("KOSPI", "South Korea KOSPI", "^KS11", "Asia/Seoul")]
+    assert [spec["key"] for spec in specs] == [key for key, _, _, _ in expected]
+    for spec, (_, label, symbol, tz) in zip(specs, expected):
+        assert spec["label"] == label and spec["unit"] == "index" and spec["timezone"] == tz
+        assert spec["sources"] == spec["live"] == [{"type": "yahoo", "symbol": symbol, "timezone": tz}]
+    for other in service.sections():
+        if other["id"] != "global_equities":
+            for spec in service.specs(other["id"]):
+                assert "timezone" not in spec
+                assert all("timezone" not in src for src in spec.get("sources", []) + spec.get("live", []))
 
 
 def test_symbol_section_charts_default_or_requested_tickers(monkeypatch):
@@ -227,6 +297,45 @@ def test_symbol_section_charts_default_or_requested_tickers(monkeypatch):
     assert nvda["intraday"] is True and len(nvda["series"]) == 30 and "error" not in nvda
     assert custom["items"]["ZZZZ"]["error"] == "unavailable" and custom["items"]["ZZZZ"]["series"] == []
     assert list(service.snapshot("1d", "stocks", symbols=[])["items"]) == []
+
+
+def test_session_reference_matches_aware_local_dates_not_timestamp_prefixes():
+    from backend.market_data.macro import LiveData, session_reference
+
+    live = LiveData(source="fixture", price=192, prev_close=190.5, as_of="2026-09-24T20:05-04:00",
+                    bars=[("2026-09-25T00:00Z", 191), ("2026-09-25T09:05+09:00", 192)])
+    assert live.chart_reference is None
+    assert session_reference(live, "Asia/Tokyo") == {
+        "kind": "previous_close", "value": 190.5, "session_date": "2026-09-25", "timezone": "Asia/Tokyo",
+    }
+
+
+@pytest.mark.parametrize("prev_close", [None, 0, -1, float("nan"), float("inf"), float("-inf")])
+def test_session_reference_rejects_missing_nonpositive_and_nonfinite_baselines(prev_close):
+    from backend.market_data.macro import LiveData, session_reference
+
+    live = LiveData(source="fixture", price=192, prev_close=prev_close, as_of="2026-09-25T10:00-04:00",
+                    bars=[("2026-09-25T09:30-04:00", 191)])
+    assert session_reference(live, "America/New_York") is None
+
+
+@pytest.mark.parametrize("overrides", [
+    pytest.param({"as_of": "2026-09-28T08:00-04:00"}, id="newer-quote"),
+    pytest.param({"as_of": None}, id="missing-quote-time"),
+    pytest.param({"as_of": "2026-09-25T10:00"}, id="naive-quote-time"),
+    pytest.param({"as_of": "broken"}, id="invalid-quote-time"),
+    pytest.param({"bars": []}, id="no-bars"),
+    pytest.param({"bars": [("2026-09-24T15:55-04:00", 189), ("2026-09-25T09:30-04:00", 191)]}, id="multiple-bar-dates"),
+    pytest.param({"bars": [("2026-09-25T09:30", 191)]}, id="naive-bar-time"),
+    pytest.param({"bars_timezone_known": False}, id="unknown-bar-timezone"),
+])
+def test_session_reference_requires_every_bar_to_match_a_proven_quote_date(overrides):
+    from backend.market_data.macro import LiveData, session_reference
+
+    values = dict(source="fixture", price=192, prev_close=190.5, as_of="2026-09-25T10:00-04:00",
+                  bars=[("2026-09-25T09:30-04:00", 191)])
+    live = LiveData(**dict(values, **overrides))
+    assert session_reference(live, "America/New_York") is None
 
 
 def session_macro(monkeypatch, bars):
@@ -307,6 +416,7 @@ def test_session_metadata_excludes_non_symbol_sections_and_overlays(monkeypatch,
     service, _ = session_macro(monkeypatch, [("2026-09-25T10:00-04:00", 191.0)])
     entry = service.snapshot("1d", section)["items"][key]
     assert "session" not in entry and "session_note" not in entry
+    assert "chart_reference" not in entry
 
 
 @pytest.mark.parametrize("bad_bar", [
@@ -469,41 +579,72 @@ def test_japan_fx_and_us_japan_gap_sections(monkeypatch):
     assert gaps["items"]["USJP2Y"]["unit"] == "bp"
     assert gaps["items"]["USJP2Y"]["metrics"]["value"] == pytest.approx((4.71 - 1.02) * 100)
     assert gaps["items"]["USJP10Y"]["daily_source"] == "US10Y minus JP10Y"
-    for tenor in ("2", "5", "10", "30"):
-        components = gaps["items"][f"USJP{tenor}Y"]["chart_series"]
-        assert [component["key"] for component in components] == [f"US{tenor}Y", f"JP{tenor}Y"]
-        assert all(component["unit"] == "pct" and len(component["series"]) == 22 for component in components)
+    assert gaps["section"]["chart_mode"] is None
+    for tenor, bp in (("2", 369), ("5", 348), ("10", 320), ("30", 117)):
+        entry = gaps["items"][f"USJP{tenor}Y"]
+        assert entry["unit"] == "bp" and entry["metrics"]["value"] == pytest.approx(bp)
+        assert entry["series"] == [{"t": f"2026-09-{d:02d}", "v": pytest.approx(bp)} for d in range(1, 23)]
+        assert "chart_series" not in entry and "chart_reference" not in entry
     assert "chart_series" not in japan["items"]["USDJPY"]
     assert all(item["live_note"].startswith("daily data only") for item in gaps["items"].values())
 
 
-def test_derived_gap_uses_only_shared_dates(monkeypatch):
-    service = offline_macro(monkeypatch)
-    original = service.indices.try_series
-
-    def uneven(key, sources, fetch=None):
-        if key == "US2Y":
-            return [("2026-09-01", 4.0), ("2026-09-02", 4.1), ("2026-09-03", 4.2)]
-        if key == "JP2Y":
-            return [("2026-09-01", 1.0), ("2026-09-03", 1.1)]
-        return original(key, sources, fetch)
-
-    monkeypatch.setattr(service.indices, "try_series", uneven)
-    entry = service.snapshot("3m", "us_jp_gaps")["items"]["USJP2Y"]
+@pytest.mark.parametrize("tenor", ["2", "5", "10", "30"])
+@pytest.mark.parametrize("range_key", ["1d", "3m"])
+def test_derived_gap_uses_only_shared_dates(monkeypatch, tenor, range_key):
+    service = offline_macro(monkeypatch, daily={
+        f"US{tenor}Y": [("2026-09-01", 4.0), ("2026-09-02", 4.1), ("2026-09-03", 4.2),
+                       ("2026-09-04", 1.1), ("2026-09-05", 0.8), ("2026-09-07", 5.0)],
+        f"JP{tenor}Y": [("2026-09-01", 1.0), ("2026-09-03", 1.1), ("2026-09-04", 1.1),
+                       ("2026-09-05", 1.3), ("2026-09-06", 1.0)],
+    })
+    snap = service.snapshot(range_key, "us_jp_gaps")
+    entry = snap["items"][f"USJP{tenor}Y"]
+    assert snap["section"]["chart_mode"] is None
     assert entry["series"] == [
         {"t": "2026-09-01", "v": pytest.approx(300.0)},
         {"t": "2026-09-03", "v": pytest.approx(310.0)},
+        {"t": "2026-09-04", "v": 0.0},
+        {"t": "2026-09-05", "v": pytest.approx(-50.0)},
     ]
-    assert entry["metrics"]["as_of"] == "2026-09-03"
-    assert entry["chart_series"][0]["series"] == [
-        {"t": "2026-09-01", "v": 4.0},
-        {"t": "2026-09-02", "v": 4.1},
-        {"t": "2026-09-03", "v": 4.2},
-    ]
-    assert entry["chart_series"][1]["series"] == [
-        {"t": "2026-09-01", "v": 1.0},
-        {"t": "2026-09-03", "v": 1.1},
-    ]
+    assert entry["unit"] == "bp" and "error" not in entry
+    assert entry["metrics"]["as_of"] == entry["metrics"]["daily_last_date"] == "2026-09-05"
+    assert entry["metrics"]["value"] == pytest.approx(-50.0) and entry["metrics"]["prev_close"] == 0.0
+    assert entry["metrics"]["change"] == pytest.approx(-50.0) and entry["metrics"]["live"] is False
+    assert "chart_series" not in entry and "chart_reference" not in entry
+    assert entry["intraday"] is False
+    if range_key == "1d":
+        assert entry["fallback"] == "daily"
+
+
+@pytest.mark.parametrize("bp", [300.0, 0.0, -50.0])
+def test_derived_gap_preserves_signed_values_without_a_percent_baseline(monkeypatch, bp):
+    service = offline_macro(monkeypatch, daily={
+        "US2Y": [("2026-09-01", 1.0 + bp / 100), ("2026-09-02", 1.0 + bp / 100)],
+        "JP2Y": [("2026-09-01", 1.0), ("2026-09-02", 1.0)],
+    })
+    entry = service.snapshot("3m", "us_jp_gaps")["items"]["USJP2Y"]
+    assert entry["series"] == [{"t": day, "v": pytest.approx(bp)} for day in ("2026-09-01", "2026-09-02")]
+    assert entry["unit"] == "bp" and entry["metrics"]["value"] == pytest.approx(bp)
+    assert entry["metrics"]["change"] == 0.0 and "error" not in entry
+    assert "chart_series" not in entry and "chart_reference" not in entry
+
+
+@pytest.mark.parametrize("side", ["US", "JP"])
+@pytest.mark.parametrize("missing", [None, [], [("2026-08-31", 1.0)]], ids=["missing", "empty", "no-shared-date"])
+@pytest.mark.parametrize("range_key", ["1d", "3m"])
+def test_derived_gap_missing_component_is_unavailable_not_zero(monkeypatch, side, missing, range_key):
+    daily = {"US2Y": [("2026-09-01", 4.0)], "JP2Y": [("2026-09-01", 1.0)], f"{side}2Y": missing}
+    items = offline_macro(monkeypatch, daily=daily).snapshot(range_key, "us_jp_gaps")["items"]
+    entry = items["USJP2Y"]
+    assert entry["unit"] == "bp" and entry["series"] == [] and entry["error"] == "unavailable"
+    assert entry["metrics"]["value"] is None and entry["metrics"]["as_of"] is None
+    assert entry["metrics"]["change"] is None and entry["metrics"]["live"] is False
+    assert "chart_series" not in entry and "chart_reference" not in entry
+    assert entry["intraday"] is False
+    if range_key == "1d":
+        assert entry["fallback"] == "daily"
+    assert all("error" not in item for key, item in items.items() if key != "USJP2Y")
 
 
 def test_macro_snapshot_uses_live_bars_and_appends_live_point(monkeypatch):
@@ -543,7 +684,8 @@ def stock_provider_macro(monkeypatch, *, lb_bars=(), lb_quote=None, yahoo=None, 
 
     calls = []
     yahoo = yahoo if yahoo is not None else {}
-    settings = Settings({"live_sections": [{"id": "stocks", "symbols": ["NVDA.US"], "live_ttl_seconds": 15}]})
+    settings = Settings({"live_sections": [{"id": "stocks", "symbols": ["NVDA.US"], "live_ttl_seconds": 15,
+                                           "chart_mode": "percent_change"}]})
     monkeypatch.setattr(Settings, "longbridge_credentials_present", property(lambda self: True))
 
     def outcome(value):
@@ -595,6 +737,167 @@ def yahoo_stock_payload(bars=(), *, price=191.2, prev_close=190.5, stamp="2026-0
     }]}}
 
 
+@pytest.mark.parametrize("earlier_bars,stamp,has_reference", [
+    pytest.param([], "2026-09-25T16:00-04:00", True, id="same-session"),
+    pytest.param([("2026-09-24T15:55-04:00", 180)], "2026-09-25T16:00-04:00", False, id="multiple-sessions"),
+    pytest.param([], "2026-09-28T08:00-04:00", False, id="newer-quote"),
+])
+def test_yahoo_stock_reference_is_checked_before_session_filtering(monkeypatch, earlier_bars, stamp, has_reference):
+    service, calls = stock_provider_macro(monkeypatch, yahoo={
+        ("1d", "5m"): yahoo_stock_payload(earlier_bars + [("2026-09-25T09:30-04:00", 191)], stamp=stamp),
+    })
+    service.client = None
+    entry = service.snapshot("1d", "stocks")["items"]["NVDA"]
+    assert entry["session"]["date"] == "2026-09-25" and entry["intraday"] is True
+    assert entry["unit"] == "usd" and [point["v"] for point in entry["series"]] == [191]
+    assert entry["chart_reference"] == (
+        {"kind": "previous_close", "value": 190.5, "session_date": "2026-09-25", "timezone": "America/New_York"}
+        if has_reference else {"kind": "first_point_fallback", "value": None}
+    )
+    assert entry["metrics"]["value"] == 191.2 and entry["metrics"]["prev_close"] == 190.5
+    assert entry["metrics"]["as_of"] == stamp
+    assert calls == [("yahoo", "1d", "5m")]
+
+
+@pytest.mark.parametrize("key,utc_stamp,local_stamp", [
+    ("DAX", "2026-09-25T07:05+00:00", "2026-09-25T09:05+02:00"),
+    ("FTSE100", "2026-09-25T07:05+00:00", "2026-09-25T08:05+01:00"),
+    ("NIKKEI225", "2026-09-25T00:05+00:00", "2026-09-25T09:05+09:00"),
+    ("TAIEX", "2026-09-24T16:05+00:00", "2026-09-25T00:05+08:00"),
+    ("KOSPI", "2026-09-24T15:05+00:00", "2026-09-25T00:05+09:00"),
+])
+def test_global_equity_live_dispatch_preserves_exchange_timezone(monkeypatch, key, utc_stamp, local_stamp):
+    service, calls = stock_provider_macro(monkeypatch, yahoo={
+        ("1d", "5m"): yahoo_stock_payload([(utc_stamp, 101)], price=102, prev_close=100, stamp=utc_stamp),
+    })
+    service.settings = SETTINGS
+    spec = next(spec for spec in service.specs("global_equities") if spec["key"] == key)
+    live = service._live(key, spec, "1d")
+    assert live.source == f"Yahoo {spec['live'][0]['symbol']}"
+    assert live.as_of == local_stamp and live.bars == [(local_stamp, 101)]
+    assert live.chart_reference == {
+        "kind": "previous_close", "value": 100, "session_date": "2026-09-25", "timezone": spec["timezone"],
+    }
+    assert calls == [("yahoo", "1d", "5m")]
+
+
+def test_international_latest_local_date_is_selected_after_reference_validation(monkeypatch):
+    payload = yahoo_stock_payload([
+        ("2026-09-25T00:05+00:00", 42020), ("2026-09-24T00:00+00:00", 41000),
+        ("2026-09-25T00:00+00:00", 42010),
+    ], price=42030, prev_close=42000, stamp="2026-09-25T00:05+00:00")
+    service, _ = stock_provider_macro(monkeypatch, yahoo={("1d", "5m"): payload})
+    live = service._yahoo_intraday("^N225", "1d", timezone_name="Asia/Tokyo")
+    assert live.bars == [("2026-09-25T09:00+09:00", 42010), ("2026-09-25T09:05+09:00", 42020)]
+    assert (live.day_low, live.day_high) == (42010, 42020)
+    assert live.as_of == "2026-09-25T09:05+09:00" and live.prev_close == 42000
+    assert live.chart_reference is None  # A multi-day response cannot claim a one-session baseline.
+
+    unscoped = service._yahoo_intraday("JPY=X", "1d")
+    assert len(unscoped.bars) == 3 and unscoped.day_low == 41000
+    assert unscoped.as_of == "2026-09-24T20:05-04:00"
+    assert unscoped.chart_reference is None
+
+
+@pytest.mark.parametrize("symbol,tz,offset", [("^TWII", "Asia/Taipei", "+08:00"), ("^KS11", "Asia/Seoul", "+09:00")])
+def test_asian_equity_latest_date_splits_bars_on_local_midnight_not_utc(monkeypatch, symbol, tz, offset):
+    # All three bars share a UTC date, but only the latest two share the exchange date.
+    payload = yahoo_stock_payload([
+        (f"2026-09-25T00:05{offset}", 102), (f"2026-09-24T23:55{offset}", 99),
+        (f"2026-09-25T00:00{offset}", 101),
+    ], price=103, prev_close=100, stamp=f"2026-09-25T00:05{offset}")
+    service, calls = stock_provider_macro(monkeypatch, yahoo={("1d", "5m"): payload})
+    live = service._yahoo_intraday(symbol, "1d", timezone_name=tz)
+    assert live.bars == [(f"2026-09-25T00:00{offset}", 101), (f"2026-09-25T00:05{offset}", 102)]
+    assert live.as_of == f"2026-09-25T00:05{offset}" and live.price == 103
+    assert (live.day_low, live.day_high) == (101, 102)
+    assert live.prev_close == 100 and live.chart_reference is None
+    assert calls == [("yahoo", "1d", "5m")]
+
+
+@pytest.mark.parametrize("symbol,tz,local_stamp", [
+    ("^N225", "Asia/Tokyo", "2026-09-25T09:05+09:00"),
+    ("^TWII", "Asia/Taipei", "2026-09-25T08:05+08:00"),
+    ("^KS11", "Asia/Seoul", "2026-09-25T09:05+09:00"),
+])
+def test_international_missing_quote_timestamp_cannot_borrow_bar_time_for_reference(monkeypatch, symbol, tz, local_stamp):
+    payload = yahoo_stock_payload([("2026-09-25T00:05+00:00", 42010)], price=42010, prev_close=42000)
+    del payload["chart"]["result"][0]["meta"]["regularMarketTime"]
+    service, _ = stock_provider_macro(monkeypatch, yahoo={("1d", "5m"): payload})
+    live = service._yahoo_intraday(symbol, "1d", timezone_name=tz)
+    assert live.bars == [(local_stamp, 42010)]
+    assert live.as_of == live.bars[-1][0] and live.prev_close == 42000
+    assert live.chart_reference is None
+
+
+@pytest.mark.parametrize("prev_close", [float("nan"), float("inf"), float("-inf")])
+def test_international_nonfinite_previous_close_keeps_valid_quote_and_bars(monkeypatch, prev_close):
+    payload = yahoo_stock_payload([("2026-09-25T00:05+00:00", 42010)], price=42020,
+                                  prev_close=prev_close, stamp="2026-09-25T00:05+00:00")
+    service, _ = stock_provider_macro(monkeypatch, yahoo={("1d", "5m"): payload})
+    live = service._yahoo_intraday("^N225", "1d", timezone_name="Asia/Tokyo")
+    assert live.price == 42020 and live.bars == [("2026-09-25T09:05+09:00", 42010)]
+    assert live.prev_close is None and live.chart_reference is None
+
+
+@pytest.mark.parametrize("key,symbol,tz,base,local_stamp", [
+    ("NIKKEI225", "^N225", "Asia/Tokyo", 42000, "2026-09-23T09:05+09:00"),
+    ("TAIEX", "^TWII", "Asia/Taipei", 25000, "2026-09-23T08:05+08:00"),
+    ("KOSPI", "^KS11", "Asia/Seoul", 3500, "2026-09-23T09:05+09:00"),
+])
+def test_percent_reference_only_applies_to_intraday_1d_and_daily_append_uses_exchange_date(monkeypatch, key, symbol, tz, base, local_stamp):
+    from backend.market_data.macro import LiveData, session_reference
+
+    live = LiveData(source=f"Yahoo {symbol}", price=base + 10, prev_close=base, as_of="2026-09-22T20:05-04:00",
+                    bars=[(local_stamp, base + 5)])
+    live.chart_reference = session_reference(live, tz)
+    service = offline_macro(monkeypatch, {key: live})
+
+    def index(range_key):
+        return service.snapshot(range_key, "global_equities")["items"][key]
+
+    intraday = index("1d")
+    assert intraday["chart_reference"] == {
+        "kind": "previous_close", "value": base, "session_date": "2026-09-23", "timezone": tz,
+    }
+    assert intraday["series"] == [{"t": local_stamp, "v": base + 5}]
+    assert intraday["unit"] == "index" and intraday["metrics"]["value"] == base + 10
+    assert index("5d")["chart_reference"] == {"kind": "first_point", "value": None}
+    daily = index("1m")
+    assert daily["series"][-2:] == [{"t": "2026-09-22", "v": base}, {"t": "2026-09-23", "v": base + 10}]
+    assert daily["chart_reference"] == {"kind": "first_point", "value": None}
+    assert daily["timezone"] == tz and daily["intraday"] is False
+    assert index("1m")["series"] == daily["series"]  # Appending never mutates cached daily history.
+    live.bars = []  # Even an attached reference must not be applied to the daily fallback.
+    fallback = index("1d")
+    assert fallback["intraday"] is False and fallback["fallback"] == "daily"
+    assert fallback["chart_reference"] == {"kind": "first_point", "value": None}
+
+
+@pytest.mark.parametrize("key,tz,base", [
+    ("DAX", "Europe/Berlin", 25000), ("FTSE100", "Europe/London", 9500),
+    ("NIKKEI225", "Asia/Tokyo", 42000), ("TAIEX", "Asia/Taipei", 25000), ("KOSPI", "Asia/Seoul", 3500),
+])
+@pytest.mark.parametrize("available", [True, False])
+def test_global_equities_daily_fallback_and_unavailable_are_isolated(monkeypatch, key, tz, base, available):
+    service = offline_macro(monkeypatch, daily=None if available else {key: None})
+    items = service.snapshot("1d", "global_equities")["items"]
+    entry = items[key]
+    assert entry["timezone"] == tz and entry["unit"] == "index"
+    assert entry["intraday"] is False and entry["fallback"] == "daily"
+    assert entry["chart_reference"] == {"kind": "first_point", "value": None}
+    assert entry["live_source"] is None and entry["metrics"]["live"] is False
+    assert "session" not in entry and "chart_series" not in entry
+    if available:
+        assert entry["daily_source"] == f"stub:{key}" and "error" not in entry
+        assert entry["metrics"]["value"] == base and len(entry["series"]) == 22
+        assert entry["series"][-1] == {"t": "2026-09-22", "v": base}
+    else:
+        assert entry["error"] == "unavailable" and entry["series"] == []
+        assert entry["metrics"]["value"] is None and entry["daily_source"] is None
+    assert all("error" not in item for other, item in items.items() if other != key)
+
+
 @pytest.mark.parametrize("quote_date,bars,day,offset,values", [
     ("2026-09-26", [("2026-09-25T15:55-04:00", 192), ("2026-09-25T09:30-04:00", 191)],
      "2026-09-25", "-04:00", [191, 192]),
@@ -633,6 +936,11 @@ def test_stock_provider_selects_latest_regular_session_before_trimming(monkeypat
     assert entry["metrics"]["as_of"] == quote_time and entry["metrics"]["value"] == 195
     assert entry["metrics"]["change"] == 1
     assert entry["metrics"]["day_high"] == max(values) and entry["metrics"]["day_low"] == min(values)
+    # Longbridge's previous close belongs to its quote date, after selecting the latest session.
+    assert entry["chart_reference"] == (
+        {"kind": "previous_close", "value": 194, "session_date": day, "timezone": "America/New_York"}
+        if quote_date == day else {"kind": "first_point_fallback", "value": None}
+    )
     assert calls == [("longbridge", "bars", "NVDA.US", "Min_5", 160), ("longbridge", "quote", "NVDA.US")]
 
 
@@ -668,6 +976,9 @@ def test_stock_fallback_quote_preserves_primary_chart(monkeypatch):
     assert entry["metrics"]["change"] == pytest.approx(0.7)
     assert entry["metrics"]["as_of"] == "2026-09-28T08:00-04:00"
     assert entry["metrics"]["day_low"] == entry["metrics"]["day_high"] == 191
+    # Yahoo has a valid Monday reference, but the displayed Friday chart is Longbridge's.
+    assert entry["chart_reference"] == {"kind": "first_point_fallback", "value": None}
+    assert service._live_cache[("STOCKS_NVDA", "stock_1d")][1].chart_reference is None
     assert len(calls) == 3 and calls[-1] == ("yahoo", "1d", "5m")
 
 
@@ -697,7 +1008,8 @@ def test_stock_recovers_yahoo_lookback_without_replacing_primary_quote(monkeypat
     assert metrics["as_of"] == "2026-09-28T08:00-04:00"
     assert (metrics["day_low"], metrics["day_high"]) == (191, 193)
     cached = service._live_cache[("STOCKS_NVDA", "stock_1d")][1]
-    assert cached.bars_timezone_known is True
+    assert cached.bars_timezone_known is True and cached.chart_reference is None
+    assert entry["chart_reference"] == {"kind": "first_point_fallback", "value": None}
     assert calls[-2:] == [("yahoo", "1d", "5m"), ("yahoo", "5d", "5m")]
     before = list(calls)
     assert service.snapshot("1d", "stocks")["items"]["NVDA"] == entry
@@ -752,11 +1064,14 @@ def test_stock_yahoo_initial_quote_survives_empty_or_bad_history_and_lookback_fa
 def test_stock_widened_history_never_supplies_quote_or_multiday_comparison(monkeypatch, initial):
     service, calls = stock_provider_macro(monkeypatch, yahoo={
         ("1d", "5m"): initial,
-        ("5d", "5m"): yahoo_stock_payload([("2026-09-25T10:00-04:00", 192)], price=999, prev_close=50),
+        ("5d", "5m"): yahoo_stock_payload([("2026-09-25T10:00-04:00", 192)], price=999, prev_close=50,
+                                            stamp="2026-09-25T16:00-04:00"),
     })
     entry = service.snapshot("1d", "stocks")["items"]["NVDA"]
     assert entry["session"]["date"] == "2026-09-25" and entry["chart_source"] == "Yahoo NVDA"
     assert entry["live_source"] is None
+    # Even one returned session with a matching quote date cannot rehabilitate a 5D baseline.
+    assert entry["chart_reference"] == {"kind": "first_point_fallback", "value": None}
     metrics = entry["metrics"]
     assert (metrics["value"], metrics["prev_close"], metrics["change"]) == (190, 188, 2)
     assert metrics["live"] is False and metrics["as_of"] == "2026-09-24"
@@ -773,6 +1088,7 @@ def test_stock_no_history_keeps_quote_and_only_labeled_daily_fallback(monkeypatc
     entry = service.snapshot("1d", "stocks")["items"]["NVDA"]
     assert entry["series"] == [{"t": t, "v": v} for t, v in daily]
     assert entry["fallback"] == "daily" and entry["intraday"] is False
+    assert entry["chart_reference"] == {"kind": "first_point", "value": None}
     assert "session" not in entry and entry["chart_source"] is None
     assert entry["metrics"]["value"] == 195 and entry["metrics"]["change"] == 1
     assert entry["metrics"]["day_high"] is None and entry["metrics"]["day_low"] is None
@@ -889,6 +1205,7 @@ def test_stock_5d_keeps_30_minute_yahoo_chart_and_ordinary_1d_metrics(monkeypatc
     assert entry["metrics"]["value"] == 191.2 and entry["metrics"]["change"] == pytest.approx(0.7)
     assert entry["metrics"]["day_high"] == 900
     assert "session" not in entry and "chart_source" not in entry
+    assert entry["chart_reference"] == {"kind": "first_point", "value": None}
     assert calls == [("yahoo", "1d", "5m"), ("yahoo", "5d", "30m")]
     assert service.live_value("stocks", "NVDA") == ("2026-09-28T08:00-04:00", 191.2)
     assert len(calls) == 2
@@ -897,10 +1214,15 @@ def test_stock_5d_keeps_30_minute_yahoo_chart_and_ordinary_1d_metrics(monkeypatc
 def test_stock_primary_quote_missing_time_is_not_borrowed_from_chart_or_daily(monkeypatch):
     service, _ = stock_provider_macro(
         monkeypatch, lb_quote={"last": 195, "prev_close": 194},
-        yahoo={("1d", "5m"): yahoo_stock_payload([("2026-09-25T10:00-04:00", 192)], price=999, prev_close=50)},
+        yahoo={("1d", "5m"): yahoo_stock_payload([("2026-09-25T10:00-04:00", 192)], price=999, prev_close=50,
+                                                stamp="2026-09-25T16:00-04:00")},
     )
     entry = service.snapshot("1d", "stocks")["items"]["NVDA"]
     assert entry["live_source"] == "Longbridge NVDA.US" and entry["chart_source"] == "Yahoo NVDA"
     assert entry["metrics"]["as_of"] is None
     assert (entry["metrics"]["value"], entry["metrics"]["prev_close"], entry["metrics"]["change"]) == (195, 194, 1)
     assert entry["session"]["date"] == "2026-09-25"
+    assert entry["chart_reference"] == {
+        "kind": "previous_close", "value": 50, "session_date": "2026-09-25", "timezone": "America/New_York",
+    }
+    assert entry["series"] == [{"t": "2026-09-25T10:00:00-04:00", "v": 192}]

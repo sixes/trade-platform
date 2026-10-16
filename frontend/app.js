@@ -140,7 +140,7 @@
         host.appendChild(node);
       }
       const ctl = {
-        id: section.id, card: node, curve: !!section.curve, range: null, timer: null, data: null, inflight: false,
+        id: section.id, card: node, curve: !!section.curve, chartMode: section.chart_mode, range: null, timer: null, data: null, inflight: false,
         storageKey: `trade-plat.liveRange.${section.id}`, defaultRange: section.hidden ? "1y" : (defaultRange || "1d"),
         variantsKey: `trade-plat.liveVariants.${section.id}`, variants: {},
         symbolsKey: `trade-plat.liveSymbols.${section.id}`, symbols: null, defaultSymbols: null,
@@ -222,10 +222,12 @@
       (ctl.render || renderLiveSection)(ctl, data);
       scheduleLiveRefresh(ctl, ((data.refresh_seconds || data.live_ttl_seconds || 55) * 1000) + 300);
     } catch (err) {
-      // A failed poll must not leave a regular-session stock chart looking live.
+      // A failed poll must not leave percentage or spread charts looking current.
+      const percentChart = ctl.chartMode === "percent_change";
+      ctl.card.querySelectorAll(".chart-baseline").forEach((el) => { el.textContent = ""; });
       Object.keys(state.charts).filter((key) => key.startsWith(`live:${ctl.id}:`)).forEach((key) => {
         const name = key.slice(`live:${ctl.id}:`.length);
-        if (!state.charts[key].$stockSession && !isSessionStock(ctl, name, requestedRange)) return;
+        if (!percentChart && ctl.data?.items?.[name]?.unit !== "bp" && !state.charts[key].$stockSession && !isSessionStock(ctl, name, requestedRange)) return;
         clearSeriesChart(key);
         const stats = document.getElementById(`live-${ctl.id}-stats-${domKey(name)}`);
         if (stats) stats.innerHTML = '<span class="sub">chart unavailable - update failed</span>';
@@ -260,6 +262,7 @@
     const container = ctl.card.querySelector(".macro-grid");
     const names = Object.keys(items);
     const editable = Array.isArray(ctl.symbols);
+    const percentChart = ctl.chartMode === "percent_change";
     if (container.dataset.built !== names.join(",")) {
       container.innerHTML = names.map((name) => `
         <div class="macro-card" data-key="${esc(name)}">
@@ -270,6 +273,7 @@
           </div>
           <div class="macro-stats" id="live-${sid}-stats-${domKey(name)}"></div>
           <div class="macro-chart"><canvas id="live-${sid}-chart-${domKey(name)}"></canvas></div>
+          ${percentChart ? `<div class="muted small chart-baseline" id="live-${sid}-baseline-${domKey(name)}"></div>` : ""}
         </div>`).join("");
       if (!names.length) {
         container.innerHTML = `<div class="empty">${editable ? "No tickers charted - add one above or press Reset for the defaults." : "No series configured for this section."}</div>`;
@@ -285,7 +289,9 @@
       const id = domKey(name);
       const chartKey = `live:${sid}:${name}`;
       const scopedStock = isSessionStock(ctl, name, data.range) || (editable && data.range === "1d" && "session" in entry);
-      const clearStaleStock = scopedStock || !!state.charts[chartKey]?.$stockSession;
+      const clearStale = percentChart || unit === "bp" || scopedStock || !!state.charts[chartKey]?.$stockSession;
+      const baseline = document.getElementById(`live-${sid}-baseline-${id}`);
+      if (baseline) baseline.textContent = "";
       $(`#live-${sid}-label-${id}`).textContent = entry.label || "";
       const variantHost = $(`#live-${sid}-variants-${id}`);
       const variants = entry.variants || [];
@@ -306,7 +312,7 @@
       badge.title = m.live ? `${entry.live_source} - as of ${m.as_of}`
         : historyOnly ? "Intraday session history; live quote unavailable" : (entry.live_note || "");
       if (entry.error) {
-        if (clearStaleStock) clearSeriesChart(chartKey);
+        if (clearStale) clearSeriesChart(chartKey);
         $(`#live-${sid}-stats-${id}`).innerHTML = `<span class="sub">unavailable - no daily history or live quote from ${esc((entry.live_source || entry.daily_source || "any source"))}${editable ? "; check the ticker" : ""}</span>`;
         return;
       }
@@ -317,22 +323,23 @@
         ? `<span class="sub">Session ${esc(entry.session.date)} · ET</span>${entry.chart_source && entry.chart_source !== entry.live_source ? `<span class="sub">chart: ${esc(entry.chart_source)}</span>` : ""}` : "";
       $(`#live-${sid}-stats-${id}`).innerHTML = `
         <span class="value">${fmtValue(m.value, unit)}</span>
-        <span class="chg ${chg > 0 ? "gain" : chg < 0 ? "loss" : ""}">${fmtChange(chg, unit, m.value)}${unit !== "usd" && m.change_pct != null ? ` (${signed(m.change_pct, 2)}%)` : ""}</span>
+        <span class="chg ${chg > 0 ? "gain" : chg < 0 ? "loss" : ""}">${fmtChange(chg, unit, m.value)}${unit !== "usd" && unit !== "bp" && m.change_pct != null ? ` (${signed(m.change_pct, 2)}%)` : ""}</span>
         ${m.day_low != null ? `<span class="sub">day ${fmtRange(m.day_low, m.day_high, unit)}</span>` : ""}
         <span class="sub">52w ${fmtRange(m.low_52w, m.high_52w, unit)}</span>
         <span class="sub">pctl ${num(m.percentile, 0)}</span>
         <span class="sub" title="${esc(entry.daily_source || "")}">${esc(String(entry.live_source || entry.daily_source || "").split(":")[0])}</span>
         ${sessionNote}${rangeNote}${note}`;
-      if (typeof Chart !== "undefined" && entry.chart_series && entry.chart_series.length) {
-        drawOverlayChart(chartKey, `#live-${sid}-chart-${id}`, entry.chart_series, entry.intraday ? data.range : "daily");
-      } else if (clearStaleStock && (!entry.series || !entry.series.length)) {
+      if (clearStale && (typeof Chart === "undefined" || !Array.isArray(entry.series) || !entry.series.length)) {
         clearSeriesChart(chartKey);
-        $(`#live-${sid}-stats-${id}`).insertAdjacentHTML("beforeend", '<span class="sub">chart unavailable - no bars</span>');
+        $(`#live-${sid}-stats-${id}`).insertAdjacentHTML("beforeend", `<span class="sub">chart unavailable - ${typeof Chart === "undefined" ? "chart library not loaded" : "no bars"}</span>`);
       } else if (typeof Chart !== "undefined" && entry.series && entry.series.length) {
         const session = scopedStock && entry.intraday ? (entry.session || null) : undefined;
-        const drawn = drawSeriesChart(chartKey, `#live-${sid}-chart-${id}`, entry.series, LIVE_PALETTE[i % LIVE_PALETTE.length], entry.intraday ? data.range : "daily", unit, name, undefined, session);
-        if (drawn === false && scopedStock) {
-          $(`#live-${sid}-stats-${id}`).insertAdjacentHTML("beforeend", `<span class="sub">chart unavailable - ${esc(entry.session_note || "no usable regular-session timestamps/bars")}</span>`);
+        const percentConfig = percentChart ? { reference: entry.chart_reference, timezone: entry.timezone } : undefined;
+        const drawn = drawSeriesChart(chartKey, `#live-${sid}-chart-${id}`, entry.series, LIVE_PALETTE[i % LIVE_PALETTE.length], entry.intraday ? data.range : "daily", unit, name, undefined, session, percentConfig);
+        if (drawn === true && baseline) baseline.textContent = state.charts[chartKey].$baselineLabel;
+        if (drawn === false && clearStale) {
+          const reason = scopedStock && entry.session_note ? entry.session_note : "no usable bars or chart reference";
+          $(`#live-${sid}-stats-${id}`).insertAdjacentHTML("beforeend", `<span class="sub">chart unavailable - ${esc(reason)}</span>`);
         }
       }
     });
@@ -413,78 +420,85 @@
     },
   };
 
-  function drawOverlayChart(key, selector, chartSeries, range) {
-    const datasets = chartSeries.map((item, i) => ({
-      label: item.key,
-      data: item.series.map((p) => ({ x: Date.parse(p.t), y: p.v })),
-      borderColor: LIVE_PALETTE[i % LIVE_PALETTE.length],
-      backgroundColor: "transparent",
-      borderWidth: 1.7,
-      pointRadius: 0,
-      pointHitRadius: 10,
-      tension: 0.08,
-      spanGaps: true,
-    }));
-    const existing = state.charts[key];
-    if (existing) {
-      existing.data.datasets = datasets;
-      existing.options.scales.x.ticks.callback = (v) => timeLabel(new Date(v).toISOString(), range);
-      existing.update("none");
-      return;
-    }
-    const canvas = $(selector);
-    if (!canvas) return;
-    state.charts[key] = new Chart(canvas, {
-      type: "line",
-      data: { datasets },
-      options: {
-        animation: false, responsive: true, maintainAspectRatio: false, parsing: false,
-        interaction: { mode: "nearest", axis: "x", intersect: false },
-        plugins: {
-          legend: { display: true, labels: { color: "#e6edf3", boxWidth: 10, font: { size: 11 } } },
-          tooltip: {
-            callbacks: {
-              title: (items) => (items[0] ? new Date(items[0].parsed.x).toISOString().slice(0, 10) : ""),
-              label: (ctx) => `${ctx.dataset.label}: ${fmtPrecise(ctx.parsed.y, "pct")}`,
-            },
-          },
-        },
-        scales: {
-          x: { type: "linear", ticks: { color: "#8b98a8", maxTicksLimit: 6, maxRotation: 0, font: { size: 10 }, callback: (v) => timeLabel(new Date(v).toISOString(), range) }, grid: { color: "#1f2a37" } },
-          y: { ticks: { color: "#8b98a8", maxTicksLimit: 5, font: { size: 10 }, callback: (v) => `${num(v, 2)}%` }, grid: { color: "#1f2a37" } },
-        },
-      },
-    });
-  }
-
-  // Undefined session preserves category charts; null means the session is unavailable.
-  function drawSeriesChart(key, selector, series, color, range, unit, name, thresholds, session) {
+  // Undefined session preserves category charts; null means the US session is unavailable.
+  function drawSeriesChart(key, selector, series, color, range, unit, name, thresholds, session, percentConfig) {
     const fixedSession = range === "1d" && session !== undefined;
-    let points = series, start, end, sessionTime, sessionStamp;
-    if (fixedSession) {
-      try {
-        // Never let Date.parse interpret a naive timestamp in the browser's timezone.
-        const timestamp = (t) => typeof t === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/.test(t) ? Date.parse(t) : NaN;
+    const percent = !!percentConfig;
+    const timezone = percentConfig?.timezone || session?.timezone || percentConfig?.reference?.timezone;
+    const rawValue = (v) => `${fmtPrecise(v, unit)}${unit === "index" ? " pts" : ""}`;
+    // Never let Date.parse interpret a naive intraday timestamp in the browser's timezone.
+    const timestamp = (t) => typeof t === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/.test(t) ? Date.parse(t) : NaN;
+    const dateInZone = (formatter, x) => {
+      const parts = Object.fromEntries(formatter.formatToParts(x).map((p) => [p.type, p.value]));
+      return `${parts.year}-${parts.month}-${parts.day}`;
+    };
+    let points = series, start, end, sessionTime, sessionStamp, zoneDate, zoneTime, zoneStamp, referenceValue;
+    let baselineLabel = "";
+    try {
+      if (fixedSession || percent || unit === "bp") {
+        points = (Array.isArray(series) ? series : []).filter((p) => p && Number.isFinite(p.v)).map((p) => {
+          const dateOnly = !fixedSession && typeof p.t === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.t);
+          return { ...p, dateOnly, x: dateOnly ? Date.parse(p.t) : timestamp(p.t) };
+        }).filter((p) => Number.isFinite(p.x) && (!p.dateOnly || new Date(p.x).toISOString().slice(0, 10) === p.t)).sort((a, b) => a.x - b.x);
+      }
+      if (fixedSession) {
         if (!session || session.timezone !== "America/New_York") throw new Error("unknown session timezone");
         start = timestamp(session.start);
         end = timestamp(session.end);
         sessionTime = new Intl.DateTimeFormat("en-GB", { timeZone: session.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
         sessionStamp = new Intl.DateTimeFormat("en-US", { timeZone: session.timezone, year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short" });
         if (!Number.isFinite(start) || !Number.isFinite(end) || end - start !== 390 * 60000 || sessionTime.format(start) !== "09:30" || sessionTime.format(end) !== "16:00") throw new Error("invalid session bounds");
-        points = series.map((p) => ({ ...p, x: timestamp(p.t) }));
-        if (points.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.v))) throw new Error("invalid bar");
-        // Only real regular-session bars participate in drawing, tooltips and crosshairs.
-        points = points.filter((p) => p.x >= start && p.x <= end).sort((a, b) => a.x - b.x);
-        if (!points.length) throw new Error("no regular-session bars");
-      } catch (err) {
-        clearSeriesChart(key);
-        return false;
+        // Keep the supplied historical session, including weekend views, and only its real bars.
+        points = points.filter((p) => p.x >= start && p.x <= end);
       }
+      if ((fixedSession || percent || unit === "bp") && !points.length) throw new Error("no usable bars");
+      if (percent) {
+        if (timezone) {
+          zoneDate = new Intl.DateTimeFormat("en-US", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" });
+          zoneTime = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+          zoneStamp = new Intl.DateTimeFormat("en-US", { timeZone: timezone, year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short" });
+        }
+        const reference = percentConfig.reference || {};
+        let kind = reference.kind;
+        let fallbackReason = kind === "first_point_fallback" ? "previous close unavailable" : "";
+        if (kind === "previous_close") {
+          if (!Number.isFinite(reference.value) || reference.value <= 0) throw new Error("invalid previous close");
+          let matchesSession = false;
+          try {
+            if (range === "1d" && typeof reference.timezone === "string" && /^\d{4}-\d{2}-\d{2}$/.test(reference.session_date)) {
+              const referenceDate = new Intl.DateTimeFormat("en-US", { timeZone: reference.timezone, year: "numeric", month: "2-digit", day: "2-digit" });
+              matchesSession = points.every((p) => !p.dateOnly && dateInZone(referenceDate, p.x) === reference.session_date);
+            }
+          } catch (err) { /* An uncheckable session cannot justify a previous-close baseline. */ }
+          if (!matchesSession) { kind = "first_point_fallback"; fallbackReason = "reference/session mismatch"; }
+        } else if (kind !== "first_point" && kind !== "first_point_fallback") {
+          throw new Error("unknown chart reference");
+        }
+        // Rebase only after sorting and filtering the points that will actually be drawn.
+        referenceValue = kind === "previous_close" ? reference.value : points[0].v;
+        if (!Number.isFinite(referenceValue) || referenceValue <= 0) throw new Error("invalid chart reference");
+        points = points.map((p) => ({ ...p, y: ((p.v - referenceValue) / referenceValue) * 100 }));
+        if (points.some((p) => !Number.isFinite(p.y))) throw new Error("nonfinite percentage");
+        baselineLabel = kind === "previous_close"
+          ? `% vs previous close · ${rawValue(referenceValue)} · ${reference.session_date}`
+          : `% vs first plotted point${fallbackReason ? ` (fallback: ${fallbackReason})` : ""} · ${rawValue(referenceValue)}`;
+      }
+    } catch (err) {
+      clearSeriesChart(key);
+      return false;
     }
-    const labels = fixedSession ? [] : points.map((p) => timeLabel(p.t, range));
-    const values = fixedSession ? points.map((p) => ({ x: p.x, y: p.v })) : points.map((p) => p.v);
-    const guides = (thresholds || []).map(([value, label]) => ({ label, data: fixedSession ? points.map((p) => ({ x: p.x, y: value })) : labels.map(() => value), borderColor: "#5b6b7e", borderDash: [4, 4], borderWidth: 1, pointRadius: 0, pointHitRadius: 0, fill: false, order: 2 }));
+    const labels = fixedSession ? [] : points.map((p) => {
+      // Daily dates are exchange calendar labels, not UTC instants to shift into yesterday.
+      if (!percent || !zoneTime || p.dateOnly) return timeLabel(p.t, range);
+      const date = dateInZone(zoneDate, p.x);
+      return range === "daily" ? date : range === "1d" ? zoneTime.format(p.x) : `${date.slice(5)} ${zoneTime.format(p.x)}`;
+    });
+    const values = fixedSession ? points.map((p) => ({ x: p.x, y: percent ? p.y : p.v })) : points.map((p) => percent ? p.y : p.v);
+    const guideLevels = percent ? (thresholds || []).filter(([v]) => Number.isFinite(v)).map(([v, label]) => [((v - referenceValue) / referenceValue) * 100, label]).filter(([v]) => Number.isFinite(v)) : (thresholds || []);
+    const guides = guideLevels.map(([value, label]) => ({ label, data: fixedSession ? points.map((p) => ({ x: p.x, y: value })) : labels.map(() => value), borderColor: "#5b6b7e", borderDash: [4, 4], borderWidth: 1, pointRadius: 0, pointHitRadius: 0, fill: false, order: 2 }));
     const xScale = { type: "category", ticks: { color: "#8b98a8", maxTicksLimit: 6, maxRotation: 0, font: { size: 10 } }, grid: { color: "#1f2a37" } };
+    if (unit === "bp") xScale.ticks.autoSkipPadding = 12;
+    if (percent && timezone) xScale.title = { display: true, text: timezone, color: "#8b98a8", font: { size: 10 } };
     if (fixedSession) {
       Object.assign(xScale, {
         type: "linear", min: start, max: end, bounds: "ticks", offset: false,
@@ -497,13 +511,13 @@
       });
       Object.assign(xScale.ticks, { autoSkip: false, includeBounds: true, align: "inner", callback: (v) => sessionTime.format(v) });
     }
-    const data = { labels, datasets: [{ label: name || key, data: values, borderColor: color, backgroundColor: color + "22", borderWidth: 1.5, pointRadius: fixedSession && points.length === 1 ? 3 : 0, pointHitRadius: 12, tension: 0.1, fill: true, order: 1 }, ...guides] };
+    const data = { labels, datasets: [{ label: name || key, data: values, borderColor: color, backgroundColor: color + "22", borderWidth: 1.5, pointRadius: (fixedSession || percent || unit === "bp") && points.length === 1 ? 3 : 0, pointHitRadius: 12, tension: 0.1, fill: true, order: 1 }, ...guides] };
     const options = {
       animation: false, responsive: true, maintainAspectRatio: false, parsing: !fixedSession,
       interaction: fixedSession ? { mode: "nearest", axis: "x", intersect: false } : { mode: "index", intersect: false },
       plugins: {
         legend: { display: false },
-        crosshair: { format: (v) => fmtPrecise(v, unit) },
+        crosshair: { format: (v) => percent ? `${signed(v, 3)}%` : fmtPrecise(v, unit) },
         tooltip: {
           filter: (item) => item.datasetIndex === 0,
           callbacks: {
@@ -512,15 +526,20 @@
               if (!item) return "";
               if (fixedSession) return sessionStamp.format(item.parsed.x);
               const point = item.chart.$series && item.chart.$series[item.dataIndex];
+              if (percent && zoneStamp && point && !point.dateOnly) return zoneStamp.format(point.x);
               return point ? String(point.t).replace("T", " ").replace(/[-+]\d\d:\d\d$/, "") : "";
             },
-            label: (ctx) => `${ctx.dataset.label}: ${fmtPrecise(ctx.parsed.y, unit)}`,
+            label: (ctx) => {
+              if (!percent) return `${ctx.dataset.label}: ${fmtPrecise(ctx.parsed.y, unit)}`;
+              const point = ctx.chart.$series && ctx.chart.$series[ctx.dataIndex];
+              return `${ctx.dataset.label}: ${signed(ctx.parsed.y, 2)}% (${rawValue(point?.v)})`;
+            },
           },
         },
       },
       scales: {
         x: xScale,
-        y: { ticks: { color: "#8b98a8", maxTicksLimit: 5, font: { size: 10 } }, grid: { color: "#1f2a37" } },
+        y: { ticks: { color: "#8b98a8", maxTicksLimit: 5, font: { size: 10 }, ...(percent ? { callback: (v) => `${signed(v, 2)}%` } : unit === "bp" ? { callback: (v) => fmtPrecise(v, unit) } : {}) }, grid: { color: "#1f2a37" } },
       },
     };
     const existing = state.charts[key];
@@ -529,7 +548,8 @@
       existing.data = data;
       existing.options = options;
       existing.$series = points;
-      if (fixedSession || existing.$stockSession) {
+      existing.$baselineLabel = baselineLabel;
+      if (percent || unit === "bp" || fixedSession || existing.$stockSession) {
         existing.$crosshair = null;
         existing.setActiveElements([]);
         if (existing.tooltip) existing.tooltip.setActiveElements([], { x: 0, y: 0 });
@@ -539,9 +559,10 @@
       return true;
     }
     const canvas = $(selector);
-    if (!canvas) return;
+    if (!canvas) { clearSeriesChart(key); return false; }
     const chart = new Chart(canvas, { type: "line", plugins: [crosshairPlugin], data, options });
     chart.$series = points;
+    chart.$baselineLabel = baselineLabel;
     chart.$stockSession = fixedSession;
     state.charts[key] = chart;
     return true;
@@ -878,7 +899,7 @@
       banner.className = "banner error";
       $("#banner-spinner").classList.add("hidden");
       $("#banner-phase").textContent = "Longbridge authentication problem";
-      $("#banner-message").textContent = `${quota.auth_error}. Update LONGPORT_ACCESS_TOKEN in .env and restart with ./run.sh restart.`;
+      $("#banner-message").textContent = `${quota.auth_error}. Update the LONGPORT_* credential exports in ~/.bashrc (environment/.env is used only when no profile exports exist), then restart with ./run.sh restart.`;
       $("#banner-progress").style.width = "0%";
     } else {
       banner.className = "banner hidden";
@@ -1309,7 +1330,7 @@
   }
 
   // ------------------------------------------------------------------ section navigation
-  const NAV_LABELS = { "card-vix": "VIX", "card-skew": "SKEW", "card-fg": "Fear & Greed", "card-volcomplex": "Vol complex", "card-stocks": "Stocks", "card-macro": "Rates", "card-commodities": "Commodities", "card-kalshi": "Fed odds", "card-kalshi-december_hikes": "December hikes", "regime-card": "Regime", "watchlist-card": "Watchlist", "card-screener": "Screener" };
+  const NAV_LABELS = { "card-vix": "VIX", "card-skew": "SKEW", "card-fg": "Fear & Greed", "card-volcomplex": "Vol complex", "card-stocks": "Stocks", "card-global_equities": "Global equities", "card-macro": "Rates", "card-commodities": "Commodities", "card-kalshi": "Fed odds", "card-kalshi-december_hikes": "December hikes", "regime-card": "Regime", "watchlist-card": "Watchlist", "card-screener": "Screener" };
 
   function initNav() {
     const nav = $("#section-nav");

@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -177,7 +178,9 @@ class IndexHistoryProvider:
             if kind == "fred":
                 fetchers.append((f"{label}:{src['id']}", lambda s=src: self._download(FRED_URL.format(series_id=s["id"]), s["id"])))
             elif kind == "yahoo":
-                fetchers.append((f"{label}:{src['symbol']}", lambda s=src: self._download_yahoo(s["symbol"], s.get("range", "5y"))))
+                fetchers.append((f"{label}:{src['symbol']}", lambda s=src: self._download_yahoo(
+                    s["symbol"], s.get("range", "5y"), **({"timezone_name": s["timezone"]} if s.get("timezone") else {})
+                )))
             elif kind == "cboe":
                 fetchers.append((f"{label}:{src['name']}", lambda s=src: self._download(CBOE_HISTORY_URL.format(name=s["name"].upper()), s["name"])))
             elif kind == "mof_jgb":
@@ -256,11 +259,11 @@ class IndexHistoryProvider:
             resp.raise_for_status()
             return parse_csv_series(resp.text, column)
 
-    def _download_yahoo(self, symbol: str, range_: str = "5y") -> Series:
+    def _download_yahoo(self, symbol: str, range_: str = "5y", *, timezone_name: Optional[str] = None) -> Series:
         with httpx.Client(timeout=self.timeout, follow_redirects=True, headers=BROWSER_HEADERS) as client:
             resp = client.get(YAHOO_CHART_URL.format(symbol=symbol, range=range_))
             resp.raise_for_status()
-            return parse_yahoo_chart(resp.json())
+            return parse_yahoo_chart(resp.json(), timezone_name=timezone_name)
 
     def _download_mof_jgb(self, tenor: str) -> Series:
         merged: Dict[str, float] = {}
@@ -299,18 +302,19 @@ class IndexHistoryProvider:
             path.with_suffix(".src").write_text(source, encoding="utf-8")
 
 
-def parse_yahoo_chart(payload: dict) -> Series:
+def parse_yahoo_chart(payload: dict, *, timezone_name: Optional[str] = None) -> Series:
     result = (payload.get("chart") or {}).get("result") or []
     if not result:
         raise ValueError(f"yahoo chart error: {(payload.get('chart') or {}).get('error')}")
     node = result[0]
     stamps = node.get("timestamp") or []
     closes = ((node.get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+    tz = ZoneInfo(timezone_name) if timezone_name else timezone.utc
     out: Series = []
     for stamp, close in zip(stamps, closes):
         if close is None:
             continue
-        day = datetime.fromtimestamp(int(stamp), tz=timezone.utc).date().isoformat()
+        day = datetime.fromtimestamp(int(stamp), tz=tz).date().isoformat()
         out.append((day, float(close)))
     # Yahoo can emit two bars for the live day; keep the last one.
     dedup = {}

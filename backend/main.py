@@ -234,7 +234,7 @@ def api_scan(req: ScanRequest):
     if req.scenario and req.scenario not in SCENARIO_BY_KEY:
         raise HTTPException(status_code=400, detail=f"unknown scenario {req.scenario!r}")
     if not settings.longbridge_credentials_present:
-        raise HTTPException(status_code=400, detail="Longbridge credentials missing: set LONGPORT_APP_KEY / LONGPORT_APP_SECRET / LONGPORT_ACCESS_TOKEN in .env")
+        raise HTTPException(status_code=400, detail="Longbridge credentials missing: export LONGPORT_APP_KEY / LONGPORT_APP_SECRET / LONGPORT_ACCESS_TOKEN in ~/.bashrc; environment/.env is used when no profile exports exist. Restart after updating.")
     try:
         job = jobs.start_scan(symbols, req.scenario or None, req.filters.to_config() if req.filters else None)
     except RuntimeError as exc:
@@ -287,7 +287,7 @@ def api_watchlist_refresh(req: WatchlistRequest):
     if len(symbols) > 15:
         raise HTTPException(status_code=400, detail="at most 15 symbols per refresh")
     if not settings.longbridge_credentials_present:
-        raise HTTPException(status_code=400, detail="Longbridge credentials missing: set LONGPORT_APP_KEY / LONGPORT_APP_SECRET / LONGPORT_ACCESS_TOKEN in .env")
+        raise HTTPException(status_code=400, detail="Longbridge credentials missing: export LONGPORT_APP_KEY / LONGPORT_APP_SECRET / LONGPORT_ACCESS_TOKEN in ~/.bashrc; environment/.env is used when no profile exports exist. Restart after updating.")
     try:
         job = jobs.start_iv_refresh(symbols)
     except RuntimeError as exc:

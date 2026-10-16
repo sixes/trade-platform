@@ -32,7 +32,7 @@ def main() -> int:
 
     if not settings.longbridge_credentials_present:
         ok = False
-        print("Longbridge credentials missing in environment/.env (LONGPORT_APP_KEY, LONGPORT_APP_SECRET, LONGPORT_ACCESS_TOKEN)")
+        print("Longbridge credentials missing: export LONGPORT_APP_KEY, LONGPORT_APP_SECRET and LONGPORT_ACCESS_TOKEN in ~/.bashrc; environment/.env is used when no profile exports exist. Restart after updating.")
     else:
         client = LongbridgeClient(settings)
         try:

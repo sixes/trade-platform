@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -48,12 +49,13 @@ class LiveData:
     source: str
     price: Optional[float]
     prev_close: Optional[float]
-    as_of: Optional[str]  # ISO datetime in US Eastern
-    bars: List[Tuple[str, float]] = field(default_factory=list)  # (ISO ET datetime, value)
+    as_of: Optional[str]
+    bars: List[Tuple[str, float]] = field(default_factory=list)
     day_high: Optional[float] = None
     day_low: Optional[float] = None
     bars_timezone_known: bool = True  # False when the provider supplied naive timestamps.
     chart_source: Optional[str] = None
+    chart_reference: Optional[dict] = None
 
 
 def _aware_stamp(value) -> datetime:
@@ -78,6 +80,21 @@ def _stock_quote(price, prev_close, stamp) -> tuple:
         return None, None, None
     as_of = _aware_stamp(stamp).astimezone(eastern()).isoformat(timespec="minutes") if stamp is not None else None
     return price, _finite_price(prev_close), as_of
+
+
+def session_reference(live: LiveData, timezone_name: str) -> Optional[dict]:
+    try:
+        tz = ZoneInfo(timezone_name)
+        value = _finite_price(live.prev_close)
+        if value is None or value <= 0 or not live.bars_timezone_known:
+            return None
+        session_date = _aware_stamp(live.as_of).astimezone(tz).date().isoformat()
+        dates = {_aware_stamp(t).astimezone(tz).date().isoformat() for t, _ in live.bars}
+        if dates != {session_date}:
+            return None
+        return {"kind": "previous_close", "value": value, "session_date": session_date, "timezone": timezone_name}
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        return None
 
 
 def latest_stock_session(live: LiveData) -> LiveData:
@@ -165,6 +182,7 @@ class MacroService:
                     "title": section.get("title", section["id"]),
                     "curve": bool(section.get("curve", False)),
                     "hidden": bool(section.get("hidden", False)),
+                    "chart_mode": section.get("chart_mode"),
                     "refresh_seconds": float(section.get("refresh_seconds", self.live_ttl)),
                     "live_ttl_seconds": float(section["live_ttl_seconds"]) if section.get("live_ttl_seconds") else None,
                     # Symbol sections chart a user-editable ticker list; this is the default list from config.yaml.
@@ -326,28 +344,27 @@ class MacroService:
                 entry["fallback"] = "daily"
             else:
                 points = list(daily[-DAILY_RANGES[range_key]:])
-                if live and live.price is not None and live.as_of and (not points or live.as_of[:10] > points[-1][0]):
-                    points.append((live.as_of[:10], live.price))
+                live_date = live.as_of[:10] if live and live.as_of else None
+                if live_date and spec.get("timezone"):
+                    live_date = _aware_stamp(live.as_of).astimezone(ZoneInfo(spec["timezone"])).date().isoformat()
+                if live and live.price is not None and live_date and (not points or live_date > points[-1][0]):
+                    points.append((live_date, live.price))
                 series = [{"t": d, "v": v} for d, v in points]
             entry["series"] = series[-max(history_days, 2000):]
+            if spec.get("timezone"):
+                entry["timezone"] = spec["timezone"]
+            if section.get("chart_mode") == "percent_change":
+                session_chart = range_key == "1d" and entry["intraday"]
+                entry["chart_reference"] = (
+                    bars_live.chart_reference if session_chart and bars_live and bars_live.chart_reference
+                    else {"kind": "first_point_fallback" if session_chart else "first_point", "value": None}
+                )
             if stock_1d:
                 entry["chart_source"] = bars_live.chart_source if entry["intraday"] and bars_live else None
             if stock_1d and entry["intraday"] and not derived_source:
                 entry["session"] = stock_session(entry["series"]) if bars_live.bars_timezone_known else None
                 if entry["session"] is None:
                     entry["session_note"] = "session time unavailable"
-            if derived_source:
-                component_limit = DAILY_RANGES["1m"] if intraday else DAILY_RANGES[range_key]
-                entry["chart_series"] = []
-                for component_key in (str(derived_source.get("left", "")).upper(), str(derived_source.get("right", "")).upper()):
-                    component_spec = specs_by_key.get(component_key, {})
-                    component = daily_for(component_key)[-component_limit:]
-                    entry["chart_series"].append({
-                        "key": component_key,
-                        "label": component_spec.get("label", component_key),
-                        "unit": component_spec.get("unit", "pct"),
-                        "series": [{"t": d, "v": v} for d, v in component],
-                    })
             entry["metrics"] = self._metrics(daily, live)
             if stock_1d and live and live.price is not None:
                 entry["metrics"]["as_of"] = live.as_of
@@ -452,7 +469,9 @@ class MacroService:
                 kind = str(src.get("type", "")).lower()
                 try:
                     if kind == "yahoo":
-                        result = self._yahoo_intraday(src["symbol"], range_key)
+                        result = self._yahoo_intraday(src["symbol"], range_key, **(
+                            {"timezone_name": src["timezone"]} if src.get("timezone") else {}
+                        ))
                     elif kind == "sina":
                         result = self._sina_live(src, range_key)
                     elif kind == "longbridge":
@@ -506,6 +525,7 @@ class MacroService:
             return None
         return replace(base, bars=chart.bars if chart else [], chart_source=chart.source if chart else None,
                        day_high=chart.day_high if chart else None, day_low=chart.day_low if chart else None,
+                       chart_reference=chart.chart_reference if chart else None,
                        bars_timezone_known=chart.bars_timezone_known if chart else base.bars_timezone_known)
 
     def _sina_live(self, src: dict, range_key: str) -> LiveData:
@@ -544,7 +564,7 @@ class MacroService:
         )
 
     def _yahoo_intraday(self, symbol: str, range_key: str, *, stock_1d: bool = False,
-                        lookback: bool = False) -> LiveData:
+                        lookback: bool = False, timezone_name: Optional[str] = None) -> LiveData:
         cfg = INTRADAY_RANGES[range_key]
         url = YAHOO_CHART_URL.format(symbol=symbol, range="5d" if lookback else cfg["yahoo_range"],
                                      interval="5m" if lookback else cfg["yahoo_interval"])
@@ -557,7 +577,7 @@ class MacroService:
             raise ValueError(f"yahoo chart error: {(payload.get('chart') or {}).get('error')}")
         node = result[0]
         meta = node.get("meta") or {}
-        tz = eastern()
+        tz = ZoneInfo(timezone_name) if timezone_name else eastern()
         if stock_1d:
             bars = []
             known = True
@@ -578,8 +598,11 @@ class MacroService:
                     price, prev_close, as_of = _stock_quote(meta.get("regularMarketPrice"), meta.get("chartPreviousClose"), stamp)
                 except Exception as exc:
                     log.warning("Stock quote via Yahoo %s failed: %s", symbol, exc)
-            return LiveData(source=f"Yahoo {symbol}", price=price, prev_close=prev_close, as_of=as_of,
+            live = LiveData(source=f"Yahoo {symbol}", price=price, prev_close=prev_close, as_of=as_of,
                             bars=bars, bars_timezone_known=known)
+            if not lookback:
+                live.chart_reference = session_reference(live, "America/New_York")
+            return live
         stamps = node.get("timestamp") or []
         closes = ((node.get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
         bars = [(datetime.fromtimestamp(int(t), tz=tz).isoformat(timespec="minutes"), float(c)) for t, c in zip(stamps, closes) if c is not None]
@@ -591,8 +614,11 @@ class MacroService:
             as_of = datetime.fromtimestamp(int(meta["regularMarketTime"]), tz=tz).isoformat(timespec="minutes")
         elif bars:
             as_of = bars[-1][0]
+        if timezone_name:
+            bars = sorted((t, v) for t, v in bars if math.isfinite(v))
+            price = _finite_price(price)
         values = [v for _, v in bars]
-        return LiveData(
+        live = LiveData(
             source=f"Yahoo {symbol}",
             price=float(price) if price is not None else None,
             prev_close=float(meta["chartPreviousClose"]) if meta.get("chartPreviousClose") is not None else None,
@@ -601,6 +627,16 @@ class MacroService:
             day_high=max(values) if values and range_key == "1d" else None,
             day_low=min(values) if values and range_key == "1d" else None,
         )
+        if timezone_name and live.prev_close is not None and not math.isfinite(live.prev_close):
+            live.prev_close = None
+        if timezone_name and range_key == "1d":
+            if meta.get("regularMarketTime"):
+                live.chart_reference = session_reference(live, timezone_name)
+            if bars:
+                live.bars = [(t, v) for t, v in bars if t[:10] == bars[-1][0][:10]]
+                live.day_high = max(v for _, v in live.bars)
+                live.day_low = min(v for _, v in live.bars)
+        return live
 
     def _longbridge_intraday(self, symbol: str, range_key: str, *, stock_1d: bool = False) -> LiveData:
         cfg = INTRADAY_RANGES[range_key]
@@ -620,8 +656,10 @@ class MacroService:
                 price, prev_close, as_of = _stock_quote(quote.get("last"), quote.get("prev_close"), quote.get("timestamp"))
             except Exception as exc:
                 log.warning("Stock quote via Longbridge %s failed: %s", symbol, exc)
-            return LiveData(source=f"Longbridge {symbol}", price=price, prev_close=prev_close, as_of=as_of,
-                            bars=bars, bars_timezone_known=known)
+            live = latest_stock_session(LiveData(source=f"Longbridge {symbol}", price=price, prev_close=prev_close, as_of=as_of,
+                                                 bars=bars, bars_timezone_known=known))
+            live.chart_reference = session_reference(live, "America/New_York")
+            return live
         raw = self.client.intraday_bars(symbol, cfg["lb_period"], cfg["lb_count"])
         by_session: Dict[str, List[Tuple[str, float]]] = {}
         timezone_known = True

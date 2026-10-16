@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import shlex
 from pathlib import Path
 from typing import Any, Optional
 
@@ -8,6 +10,37 @@ import yaml
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+LONGPORT_CREDENTIALS = ("LONGPORT_APP_KEY", "LONGPORT_APP_SECRET", "LONGPORT_ACCESS_TOKEN")
+
+
+def load_longport_profile(path: Path) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
+    except (OSError, UnicodeError):
+        raise RuntimeError("Cannot read Longbridge credentials from ~/.bashrc") from None
+    values = {}
+    for line in lines:
+        match = re.match(r"\s*export\s+(LONGPORT_(?:APP_KEY|APP_SECRET|ACCESS_TOKEN))\b(.*)$", line)
+        if not match:
+            continue
+        name, assignment = match.groups()
+        raw = assignment[1:] if assignment.startswith("=") else ""
+        # Never execute profile code or treat shell expansions as literal credentials.
+        if "\x00" in raw or not re.fullmatch(r"(?:'[^']*'|\"[^\"\\$`]*\"|[A-Za-z0-9_./+=:@%,-]+)(?:[ \t]+(?:#.*)?)?", raw):
+            raise RuntimeError(f"Invalid literal export for {name} in ~/.bashrc")
+        parsed = shlex.split(raw, comments=True, posix=True)
+        if len(parsed) != 1 or not parsed[0]:
+            raise RuntimeError(f"Empty literal export for {name} in ~/.bashrc")
+        values[name] = parsed[0]
+    if values:
+        if any(name not in values for name in LONGPORT_CREDENTIALS):
+            raise RuntimeError("Incomplete Longbridge exports in ~/.bashrc; set LONGPORT_APP_KEY, LONGPORT_APP_SECRET and LONGPORT_ACCESS_TOKEN together")
+        os.environ.update(values)
+
+
+load_longport_profile(Path.home() / ".bashrc")
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 

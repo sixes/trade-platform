@@ -713,7 +713,7 @@ class JobManager:
         except ScanCancelled:
             job.finish("cancelled")
         except AuthError as exc:
-            job.finish("error", f"Longbridge authentication failed: {exc}. Update LONGPORT_ACCESS_TOKEN in .env and restart.")
+            job.finish("error", f"Longbridge authentication failed: {exc}. Update the LONGPORT_* credential exports in ~/.bashrc (environment/.env is used only when no profile exports exist), then restart.")
         except Exception as exc:
             log.exception("[job %s] failed", job.id)
             job.finish("error", str(exc))
