@@ -214,6 +214,14 @@
               <label>Max spread % <input type="number" name="max_spread_pct" min="0" max="100" step="0.5" required></label>
               <label>Min annualized yield % <input type="number" name="min_annualized_yield_pct" min="0" step="0.5" placeholder="off"></label>
               <label>Target |delta| <input type="number" name="target_delta" min="0" max="1" step="0.01" placeholder="off"></label>
+              <label>Target strike (optional) <input type="number" name="target_strike" min="0" step="any" placeholder="off"></label>
+              <label>Strike comparison
+                <select name="strike_mode" disabled>
+                  <option value="exact">Exact (=)</option>
+                  <option value="lt">Less than (&lt;)</option>
+                  <option value="gt">Greater than (&gt;)</option>
+                </select>
+              </label>
               <label>Max results <input type="number" name="max_results" min="1" max="50" step="1" required></label>
             </div>
             <div class="filters-actions">

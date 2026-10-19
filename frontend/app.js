@@ -13,8 +13,8 @@
     pollTimer: null,
   };
 
-  const FILTER_FIELDS = ["dte_min", "dte_max", "delta_min", "delta_max", "min_open_interest", "max_spread_pct", "min_annualized_yield_pct", "target_delta", "max_results"];
-  const OPTIONAL_FIELDS = new Set(["min_annualized_yield_pct", "target_delta"]);
+  const FILTER_FIELDS = ["dte_min", "dte_max", "delta_min", "delta_max", "min_open_interest", "max_spread_pct", "min_annualized_yield_pct", "target_delta", "target_strike", "strike_mode", "max_results"];
+  const OPTIONAL_FIELDS = new Set(["min_annualized_yield_pct", "target_delta", "target_strike"]);
   const STORAGE_KEY = "trade-plat.filters";
 
   const $ = (sel) => document.querySelector(sel);
@@ -734,6 +734,8 @@
       max_spread_pct: f.max_spread_pct ?? 100,
       min_annualized_yield_pct: f.min_annualized_yield_pct ?? null,
       target_delta: f.target_delta ?? null,
+      target_strike: f.target_strike ?? null,
+      strike_mode: strikeMode(f),
       max_results: f.max_results ?? 12,
     };
   }
@@ -746,32 +748,56 @@
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(all)); } catch (e) { /* storage unavailable */ }
   }
 
+  function strikeMode(filters) {
+    return filters.target_strike != null && ["exact", "lt", "gt"].includes(filters.strike_mode) ? filters.strike_mode : "exact";
+  }
+
+  function updateStrikeInput() {
+    const input = $("#scan-form [name=target_strike]");
+    const mode = $("#scan-form [name=strike_mode]");
+    const blank = input.value.trim() === "" && !input.validity.badInput;
+    const value = input.valueAsNumber;
+    input.setCustomValidity(blank || (Number.isFinite(value) && value > 0) ? "" : "Enter a finite target strike greater than 0.");
+    mode.disabled = blank;
+    if (blank) {
+      mode.value = "exact";
+      mode.classList.remove("changed");
+    }
+    return input.validity.valid;
+  }
+
   function readFilterForm() {
     const out = {};
     FILTER_FIELDS.forEach((name) => {
       const raw = $(`#scan-form [name="${name}"]`).value.trim();
-      out[name] = raw === "" ? null : Number(raw);
+      out[name] = name === "strike_mode" ? raw : raw === "" ? null : Number(raw);
     });
+    out.strike_mode = strikeMode(out);
     return out;
   }
 
   function writeFilterForm(values, defaults) {
     FILTER_FIELDS.forEach((name) => {
       const input = $(`#scan-form [name="${name}"]`);
-      const value = values[name];
+      const value = name === "strike_mode" ? strikeMode(values) : values[name];
+      const baseline = name === "strike_mode" ? strikeMode(defaults) : defaults[name];
       input.value = value == null ? "" : value;
-      input.classList.toggle("changed", !sameValue(value, defaults[name]));
+      input.classList.toggle("changed", !sameValue(value, baseline, name));
     });
+    updateStrikeInput();
   }
 
-  function sameValue(a, b) {
+  function sameValue(a, b, name) {
     if (a == null && b == null) return true;
     if (a == null || b == null) return false;
+    if (name === "strike_mode" || name === "target_strike") return a === b;
     return Math.abs(Number(a) - Number(b)) < 1e-9;
   }
 
   function filtersEqual(a, b) {
-    return FILTER_FIELDS.every((name) => sameValue(a[name], b[name]));
+    return FILTER_FIELDS.every((name) => name === "strike_mode"
+      ? sameValue(strikeMode(a), strikeMode(b), name)
+      : sameValue(a[name], b[name], name));
   }
 
   function loadFilters() {
@@ -792,6 +818,7 @@
   }
 
   function onFilterInput() {
+    if (!updateStrikeInput()) return;
     const key = activeScenarioKey();
     if (!key) return;
     const values = readFilterForm();
@@ -803,7 +830,8 @@
     updateFilterState(values, defaults);
   }
 
-  document.querySelectorAll("#scan-form .filters input").forEach((input) => input.addEventListener("change", onFilterInput));
+  document.querySelectorAll("#scan-form .filters input, #scan-form .filters select").forEach((input) => input.addEventListener("change", onFilterInput));
+  $("#scan-form [name=target_strike]").addEventListener("input", updateStrikeInput);
   $("#filters-reset").addEventListener("click", () => {
     const key = activeScenarioKey();
     const all = storedFilters();
@@ -919,6 +947,8 @@
   // ------------------------------------------------------------------ scanning
   $("#scan-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    updateStrikeInput();
+    if (!ev.currentTarget.reportValidity()) return;
     const symbols = $("#symbols-input").value.split(/[,\s]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
     const scenario = $("#scenario-select").value || null;
     const key = activeScenarioKey();
@@ -956,6 +986,10 @@
     ];
     if (filters.min_annualized_yield_pct != null) parts.push(`annualized yield >= ${filters.min_annualized_yield_pct}%`);
     if (filters.target_delta != null) parts.push(`target |delta| ${filters.target_delta}`);
+    if (filters.target_strike != null) {
+      const operator = { exact: "=", lt: "<", gt: ">" }[strikeMode(filters)];
+      parts.push(`strike ${operator} ${filters.target_strike}`);
+    }
     parts.push(`top ${filters.max_results}`);
     return parts.join(", ");
   }
@@ -1011,7 +1045,7 @@
         <td class="left symbol-cell">${esc(ticker(c.symbol))}</td>
         <td>${esc(c.expiry)}</td>
         <td>${c.dte}</td>
-        <td>${num(c.strike)}</td>
+        <td>${esc(c.strike)}</td>
         <td>${optionSide === "call" ? `${esc(c.moneyness)} ${num(c.moneyness_pct, 1)}%` : `${num(c.moneyness_pct, 1)}%`}</td>
         <td>${num(c.delta, 3)}</td>
         <td>${num(c.iv * 100, 1)}%</td>

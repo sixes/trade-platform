@@ -211,8 +211,9 @@ form.scan-row { margin-bottom: 10px; }
 .filters { border: 1px solid var(--border); border-radius: 10px; padding: 8px 14px 12px; margin: 0; }
 .filters legend { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; padding: 0 6px; }
 .filters-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 14px; }
-.filters-grid input { min-width: 0; width: 100%; padding: 6px 8px; font-size: 13px; }
-.filters-grid input.changed { border-color: var(--amber); }
+.filters-grid input, .filters-grid select { min-width: 0; width: 100%; padding: 6px 8px; font-size: 13px; }
+.filters-grid input.changed, .filters-grid select.changed { border-color: var(--amber); }
+.filters-grid select:disabled { color: var(--muted); opacity: .5; cursor: not-allowed; }
 .filters-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; gap: 12px; flex-wrap: wrap; }
 .btn { padding: 9px 16px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); cursor: pointer; font-weight: 600; }
 .btn.small { padding: 5px 10px; font-size: 12px; font-weight: 500; }

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import re
 import threading
 import time
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
@@ -89,6 +92,13 @@ class CacheWarmer:
 app = FastAPI(title="Trade Plat", version="1.0", lifespan=lifespan)
 
 
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(_request, exc: RequestValidationError):
+    # Rejected non-finite inputs must not break JSON serialization of the validation error itself.
+    errors = jsonable_encoder(exc.errors(), custom_encoder={float: lambda value: value if math.isfinite(value) else str(value)})
+    return JSONResponse(status_code=422, content={"detail": errors})
+
+
 class ScreenerFilters(BaseModel):
     dte_min: int = Field(..., ge=1, le=730)
     dte_max: int = Field(..., ge=1, le=730)
@@ -98,6 +108,8 @@ class ScreenerFilters(BaseModel):
     max_spread_pct: float = Field(100.0, ge=0.0, le=100.0)
     min_annualized_yield_pct: Optional[float] = Field(None, ge=0.0)
     target_delta: Optional[float] = Field(None, ge=0.0, le=1.0)
+    target_strike: Optional[float] = Field(None, gt=0.0, allow_inf_nan=False)
+    strike_mode: Literal["exact", "lt", "gt"] = "exact"
     max_results: int = Field(12, ge=1, le=50)
 
     @model_validator(mode="after")
@@ -120,6 +132,9 @@ class ScreenerFilters(BaseModel):
             cfg["min_annualized_yield_pct"] = self.min_annualized_yield_pct
         if self.target_delta is not None:
             cfg["target_delta"] = self.target_delta
+        if self.target_strike is not None:
+            cfg["target_strike"] = self.target_strike
+            cfg["strike_mode"] = self.strike_mode
         return cfg
 
 

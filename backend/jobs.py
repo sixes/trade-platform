@@ -15,6 +15,7 @@ from backend.analytics.screener import (
     atm_iv_by_expiry,
     build_candidates,
     filter_candidates,
+    matches_strike,
     reference_metrics,
     score_candidates,
     strike_band_for_deltas,
@@ -501,7 +502,9 @@ class ScanService:
                 scenario_chains[expiry] = self.client.option_strikes(symbol, expiry, 0.0, float("inf"), option_side, cancel)
             return scenario_chains[expiry]
 
-        # Phase 2: only the strikes that can hold the scenario's delta range, on a few expiries.
+        # Phase 2: explicitly targeted strikes bypass the approximate delta band.
+        target_strike = scenario_cfg.get("target_strike")
+        strike_mode = scenario_cfg.get("strike_mode", "exact")
         quoted = {row.symbol for row in rows}
         wanted: List[str] = []
         for k, expiry in enumerate(scenario_expiries):
@@ -510,7 +513,13 @@ class ScanService:
             dte = (expiry - today).days
             lo, hi = strike_band_for_deltas(spot, delta_lo, delta_hi, dte, reference.get("atm_iv"), reference.get("skew_ratio"), r, q, fallback_band, option_side)
             full_chain = chain(expiry)
-            pairs = subsample_strikes([p for p in full_chain if lo <= p[0] <= hi], max_strikes)
+            if target_strike is not None and strike_mode == "exact":
+                pairs = [p for p in full_chain if matches_strike(p[0], target_strike, strike_mode)]
+            else:
+                pairs = subsample_strikes([
+                    p for p in full_chain
+                    if lo <= p[0] <= hi and matches_strike(p[0], target_strike, strike_mode)
+                ], max_strikes)
             # Two strikes bracketing spot give this expiry its own ATM IV, so IV/ATM is not distorted by term structure.
             below = [p for p in full_chain if p[0] <= spot]
             above = [p for p in full_chain if p[0] >= spot]

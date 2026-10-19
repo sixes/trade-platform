@@ -253,6 +253,16 @@ def atm_iv_by_expiry(cands: Sequence[OptionCandidate], max_gap_pct: float = 3.0)
     return out
 
 
+def matches_strike(strike: float, target: Optional[float], mode: str = "exact") -> bool:
+    if target is None:
+        return True
+    if mode == "lt":
+        return strike < target
+    if mode == "gt":
+        return strike > target
+    return strike == target
+
+
 def filter_candidates(cands: Sequence[OptionCandidate], scenario_cfg: dict, atm_iv: Optional[float], enforce_spread: bool = False,
                       atm_by_expiry: Optional[Dict[str, float]] = None) -> List[OptionCandidate]:
     dte_lo, dte_hi = scenario_cfg.get("dte", [30, 45])
@@ -261,9 +271,13 @@ def filter_candidates(cands: Sequence[OptionCandidate], scenario_cfg: dict, atm_
     min_yield = scenario_cfg.get("min_annualized_yield_pct")
     max_spread = scenario_cfg.get("max_spread_pct")
     target_delta = scenario_cfg.get("target_delta")
+    target_strike = scenario_cfg.get("target_strike")
+    strike_mode = scenario_cfg.get("strike_mode", "exact")
     atm_by_expiry = atm_by_expiry or {}
     out: List[OptionCandidate] = []
     for c in cands:
+        if not matches_strike(c.strike, target_strike, strike_mode):
+            continue
         if not (dte_lo <= c.dte <= dte_hi):
             continue
         if c.option_side == "put" and c.strike >= c.spot:
