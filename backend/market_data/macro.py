@@ -6,6 +6,7 @@ polling every minute costs one upstream request per series.
 """
 from __future__ import annotations
 
+import calendar
 import logging
 import math
 import threading
@@ -183,6 +184,10 @@ class MacroService:
                     "curve": bool(section.get("curve", False)),
                     "hidden": bool(section.get("hidden", False)),
                     "chart_mode": section.get("chart_mode"),
+                    "groups": section["groups"] if isinstance(section.get("groups"), list) else [],
+                    "daily_only": bool(section.get("daily_only", False)),
+                    "ranges": section["ranges"] if isinstance(section.get("ranges"), list) else list(RANGE_KEYS),
+                    "default_range": section.get("default_range", self.settings.get("macro.default_range", "1d")),
                     "refresh_seconds": float(section.get("refresh_seconds", self.live_ttl)),
                     "live_ttl_seconds": float(section["live_ttl_seconds"]) if section.get("live_ttl_seconds") else None,
                     # Symbol sections chart a user-editable ticker list; this is the default list from config.yaml.
@@ -193,7 +198,7 @@ class MacroService:
     def live_value(self, section_id: str, key: str) -> Optional[Tuple[str, float]]:
         """(ISO ET timestamp, price) of a series' live feed, or None. Shares the live cache with snapshot()."""
         section = next((s for s in self.sections() if s["id"] == section_id), None)
-        if section is None:
+        if section is None or section["daily_only"]:
             return None
         for raw_spec in self.specs(section_id):
             if str(raw_spec["key"]).upper() != key.upper():
@@ -247,9 +252,21 @@ class MacroService:
         section = next((s for s in self.sections() if s["id"] == section_id), None)
         if section is None:
             raise KeyError(f"unknown live section {section_id!r}")
-        intraday = range_key in INTRADAY_RANGES
+        daily_only = section["daily_only"]
+        if daily_only and range_key not in DAILY_RANGES:
+            range_key = section["default_range"]
+        window_start = window_end = None
+        if daily_only:
+            end = datetime.now(eastern()).date()
+            months = {"1m": 1, "3m": 3, "6m": 6, "1y": 12, "3y": 36, "5y": 60}[range_key]
+            year, month = divmod(end.year * 12 + end.month - 1 - months, 12)
+            month += 1
+            # Every component shares inclusive calendar bounds, clamped at month-end rather than by row count.
+            window_start = end.replace(year=year, month=month, day=min(end.day, calendar.monthrange(year, month)[1])).isoformat()
+            window_end = end.isoformat()
+        intraday = range_key in INTRADAY_RANGES and not daily_only
         history_days = int(self.settings.get("data.history_days", 1260))
-        fetchers = self.external_fetchers()
+        fetchers = {} if daily_only else self.external_fetchers()
         available_types = BUILTIN_SOURCE_TYPES | set(fetchers)
         variants = {str(k).upper(): str(v) for k, v in (variants or {}).items()}
         live_ttl = section["live_ttl_seconds"]
@@ -261,7 +278,7 @@ class MacroService:
             variant_name, spec = self._resolve_variant(raw_spec, variants.get(key), available_types)
             resolved.append((key, raw_spec, variant_name, spec))
         # One Sina request refreshes every Sina-backed quote in the section instead of one request per card.
-        sina_symbols = [str(src["symbol"]) for _, _, _, spec in resolved
+        sina_symbols = [] if daily_only else [str(src["symbol"]) for _, _, _, spec in resolved
                         for src in (spec.get("live") or [])[:1] if str(src.get("type", "")).lower() == "sina"]
         if sina_symbols:
             self.sina.quotes(sina_symbols)
@@ -303,6 +320,9 @@ class MacroService:
                 if variant:
                     cache_key = prefix + f"{key}_{variant}"
                 daily = self.indices.try_series(cache_key, sources, fetchers) or []
+            if daily_only:
+                daily = [(day, value) for day, value in daily
+                         if day <= window_end and value is not None and math.isfinite(value)]
             daily_by_key[key] = daily
             return daily
 
@@ -318,9 +338,11 @@ class MacroService:
             )
             # Metrics (last price, daily change, day range) always come from the 1-day feed; the chart's bars
             # come from the requested intraday range so a 5D view still shows a proper daily change.
-            live = (self._live(series_key, spec, "1d", live_ttl, stock_1d=True) if stock_1d
-                    else self._live(series_key, spec, "1d", live_ttl))
-            bars_live = live if range_key == "1d" else (self._live(series_key, spec, range_key, live_ttl) if intraday else None)
+            live = bars_live = None
+            if not daily_only:
+                live = (self._live(series_key, spec, "1d", live_ttl, stock_1d=True) if stock_1d
+                        else self._live(series_key, spec, "1d", live_ttl))
+                bars_live = live if range_key == "1d" else (self._live(series_key, spec, range_key, live_ttl) if intraday else None)
             entry = {"label": spec.get("label", key), "unit": unit, "range": range_key, "intraday": intraday}
             entry["variant"] = variant_name
             entry["variants"] = [{"name": n, "label": (v or {}).get("label", n)} for n, v in (raw_spec.get("variants") or {}).items()]
@@ -330,12 +352,24 @@ class MacroService:
                 derived_source.get("label", "Derived spread") if derived_source
                 else self.indices.source_used.get(series_key.lower())
             )
+            if daily_only and not entry["daily_source"]:
+                configured_sources = []
+                for src in spec.get("sources", []):
+                    label = src.get("label") or str(src.get("type", "")).upper()
+                    ident = src.get("id") or src.get("symbol") or src.get("name") or src.get("tenor")
+                    configured_sources.append(f"{label}:{ident}" if ident else label)
+                entry["daily_source"] = ", ".join(configured_sources) or None
             entry["live_source"] = live.source if live and (not stock_1d or live.price is not None) else None
             entry["live_note"] = None if (live or not spec.get("live")) else "no live feed reachable"
             if not spec.get("live"):
                 entry["live_note"] = "daily data only (no intraday source for this series)"
+            if daily_only:
+                entry["live_note"] = "daily data only"
+                entry["daily_last_date"] = daily[-1][0] if daily else None
 
-            if intraday and bars_live and bars_live.bars:
+            if daily_only:
+                series = [{"t": day, "v": value} for day, value in daily if window_start <= day <= window_end]
+            elif intraday and bars_live and bars_live.bars:
                 series = [{"t": t, "v": v} for t, v in bars_live.bars]
             elif intraday:
                 # No intraday feed: fall back to the last month of daily closes so the card is never empty.
@@ -350,7 +384,7 @@ class MacroService:
                 if live and live.price is not None and live_date and (not points or live_date > points[-1][0]):
                     points.append((live_date, live.price))
                 series = [{"t": d, "v": v} for d, v in points]
-            entry["series"] = series[-max(history_days, 2000):]
+            entry["series"] = series if daily_only else series[-max(history_days, 2000):]
             if spec.get("timezone"):
                 entry["timezone"] = spec["timezone"]
             if section.get("chart_mode") == "percent_change":
@@ -365,24 +399,28 @@ class MacroService:
                 entry["session"] = stock_session(entry["series"]) if bars_live.bars_timezone_known else None
                 if entry["session"] is None:
                     entry["session_note"] = "session time unavailable"
-            entry["metrics"] = self._metrics(daily, live)
+            metrics_daily = daily if not daily_only or series else []
+            entry["metrics"] = self._metrics(metrics_daily, live)
             if stock_1d and live and live.price is not None:
                 entry["metrics"]["as_of"] = live.as_of
-            if not daily and not (live and (live.price is not None or (stock_1d and live.bars))):
+            if not metrics_daily and not (live and (live.price is not None or (stock_1d and live.bars))):
                 entry["error"] = "unavailable"
             if entry["metrics"].get("value") is not None:
                 latest[key] = entry["metrics"]["value"]
             items[key] = entry
-        return {
+        payload = {
             "section": section,
             "range": range_key,
-            "ranges": RANGE_KEYS,
+            "ranges": section["ranges"],
             "items": items,
             "curve": self._curve(latest) if section["curve"] else {},
             "generated_at": datetime.now(eastern()).isoformat(timespec="seconds"),
             "live_ttl_seconds": live_ttl or self.live_ttl,
             "refresh_seconds": section["refresh_seconds"],
         }
+        if daily_only:
+            payload.update(window_start=window_start, window_end=window_end)
+        return payload
 
     # ------------------------------------------------------------------ metrics
     @staticmethod

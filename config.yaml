@@ -40,6 +40,7 @@ indices:
   # Volatility-complex mini charts: CBOE index names (cdn.cboe.com/.../<NAME>_History.csv) or
   # {key, label, sources} entries for other providers.
   charts:
+    - VIX1D
     - VIX9D
     - VIX3M
     - VVIX
@@ -151,6 +152,55 @@ live_sections:
     refresh_seconds: 15    # page poll; live_ttl_seconds lets Longbridge bars/quotes refresh that often too
     live_ttl_seconds: 15
     symbols: [SOXL, TECL, UPRO, SPXL]   # US tickers; ".US" is added automatically
+  - id: comparisons
+    title: Market Comparisons
+    daily_only: true
+    default_range: 1y
+    ranges: [1m, 3m, 6m, 1y, 3y, 5y]
+    refresh_seconds: 1800
+    groups:
+      - id: smh_kospi
+        title: SMH ETF / KOSPI
+        mode: price_change
+        series: [SMH, KOSPI]
+        note: "Local-currency price changes, not FX-adjusted or dividend-inclusive returns. Same-date Seoul and New York closes are not simultaneous."
+      - id: rates_fed
+        title: Treasury yields / Fed policy
+        mode: rate_level
+        series: [US2Y, US10Y, DFF, DFEDTARL, DFEDTARU]
+        target_bounds: [DFEDTARL, DFEDTARU]
+        note: "Actual percentage levels. Effective federal funds is an observed rate, not the target midpoint. Changes are in basis points."
+    series:
+      - key: SMH
+        label: SMH ETF
+        unit: usd
+        timezone: America/New_York
+        sources: [{type: yahoo, symbol: SMH, timezone: America/New_York}]
+      - key: KOSPI
+        label: KOSPI
+        unit: index
+        timezone: Asia/Seoul
+        sources: [{type: yahoo, symbol: "^KS11", timezone: Asia/Seoul}]
+      - key: US2Y
+        label: US 2-year Treasury
+        unit: pct
+        sources: [{type: fred, id: DGS2}]
+      - key: US10Y
+        label: US 10-year Treasury
+        unit: pct
+        sources: [{type: fred, id: DGS10}]
+      - key: DFF
+        label: Effective federal funds
+        unit: pct
+        sources: [{type: fred, id: DFF}]
+      - key: DFEDTARL
+        label: Fed target lower
+        unit: pct
+        sources: [{type: fred, id: DFEDTARL}]
+      - key: DFEDTARU
+        label: Fed target upper
+        unit: pct
+        sources: [{type: fred, id: DFEDTARU}]
   - id: global_equities
     title: Global Equity Indices
     chart_mode: percent_change

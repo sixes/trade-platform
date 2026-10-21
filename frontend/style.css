@@ -123,6 +123,20 @@ main > *, .grid-3 > * { min-width: 0; }
 .macro-stats .chg { font-size: 14px; font-weight: 600; }
 .macro-stats .sub { color: var(--muted); font-size: 11px; }
 .macro-chart { position: relative; height: 200px; }
+.comparison-section .macro-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.comparison-card .mini-head { padding-right: 0; flex-wrap: wrap; }
+.comparison-card .macro-chart { height: 310px; margin: 10px 0; }
+.comparison-message { min-height: 36px; margin-top: 8px; }
+.comparison-sources { display: grid; gap: 8px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.comparison-note { margin-bottom: 0; }
+.breadth-card .card-head h2 { white-space: normal; }
+.breadth-card p { margin: 0 0 10px; }
+.breadth-card iframe { display: block; width: 100%; height: 540px; border: 0; margin: 12px 0; background: var(--panel-2); }
+@media (max-width: 800px) {
+  .comparison-section .macro-grid { grid-template-columns: minmax(0, 1fr); }
+  .comparison-card .macro-chart { height: 290px; }
+  .breadth-card iframe { height: 500px; }
+}
 .live-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: .06em; background: rgba(63,185,80,.15); color: var(--green); vertical-align: middle; }
 .live-badge.off { background: var(--panel); color: var(--muted); }
 .live-badge .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--green); margin-right: 4px; animation: pulse 1.6s ease-in-out infinite; }
@@ -231,6 +245,27 @@ form.scan-row { margin-bottom: 10px; }
 td.flags { white-space: normal; text-align: left; min-width: 140px; }
 .flag.warn { color: var(--amber); border-color: rgba(240,180,41,.4); }
 .flag.good { color: var(--green); border-color: rgba(63,185,80,.4); }
+#card-china-etfs { min-width: 0; max-width: 100%; }
+#card-china-etfs .card-head { flex-wrap: wrap; }
+#card-china-etfs .card-head h2 { white-space: normal; overflow-wrap: anywhere; min-width: 0; flex: 1 1 260px; }
+#card-china-etfs .card-head > .muted.small { flex: 1 1 280px; min-width: 0; text-align: left; overflow-wrap: anywhere; }
+#card-china-etfs .fold-summary { min-width: 0; overflow-wrap: anywhere; }
+#card-china-etfs.collapsed #china-etfs-meta { display: none; }
+#card-china-etfs #china-etfs-refresh { flex: none; }
+#card-china-etfs #china-etfs-refresh:disabled { opacity: .5; cursor: wait; }
+#card-china-etfs .card-body, #card-china-etfs .table-wrap { min-width: 0; max-width: 100%; }
+#card-china-etfs .table-wrap { overflow-x: auto; overscroll-behavior-x: contain; }
+#card-china-etfs table { table-layout: fixed; min-width: 1050px; }
+#card-china-etfs th, #card-china-etfs td { white-space: normal; overflow-wrap: anywhere; vertical-align: top; }
+#card-china-etfs thead th:first-child { width: 24%; }
+#card-china-etfs thead th:nth-child(2), #card-china-etfs thead th:nth-child(3) { width: 13%; }
+#card-china-etfs thead th:nth-child(4), #card-china-etfs thead th:nth-child(5) { width: 17%; }
+#card-china-etfs thead th:nth-child(6) { width: 16%; }
+#card-china-etfs td > b { font-size: 14px; }
+#card-china-etfs td .small { margin-top: 4px; font-size: 11px; }
+#card-china-etfs .china-etfs-group th { text-align: left; background: var(--panel-2); color: var(--text); padding-top: 10px; }
+#card-china-etfs .china-etfs-warning, #card-china-etfs .china-etfs-premium { color: var(--amber); font-weight: 600; }
+#card-china-etfs .china-etfs-note { margin: 10px 0 0; overflow-wrap: anywhere; }
 .warnings { color: var(--amber); font-size: 12px; margin-top: 6px; }
 .empty { color: var(--muted); padding: 14px 0; }
 .error-text { color: var(--red); }

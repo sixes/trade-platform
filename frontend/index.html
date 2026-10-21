@@ -87,6 +87,33 @@
 
     <div id="live-sections"></div>
 
+    <section class="card" id="card-china-etfs">
+      <div class="card-head">
+        <h2>Mainland China US-index ETFs / LOFs</h2>
+        <button id="china-etfs-refresh" class="btn small" type="button">Refresh</button>
+        <span id="china-etfs-meta" class="muted small" role="status" aria-live="polite">Loading fund reference data...</span>
+      </div>
+      <div class="card-body">
+        <div id="china-etfs-table" class="table-wrap" role="region" aria-label="Mainland China US-index fund reference data" tabindex="0">
+          <div class="empty">Loading fund reference data...</div>
+        </div>
+        <p class="muted small china-etfs-note">Reference premium (%) = (displayed completed close / latest published unit NAV − 1) × 100. Dates may differ; US valuation is not simultaneous. Not executable arbitrage. Fees are annual management + custody, not TER; retrieval dates are not fee effective dates. AUM is reported as dated, not realtime.</p>
+      </div>
+    </section>
+
+    <section class="card chart-card breadth-card" id="card-breadth">
+      <div class="card-head">
+        <h2>S&amp;P 500 stocks above 50-day / 200-day SMA (%)</h2>
+      </div>
+      <div class="card-body">
+        <p class="breadth-description">S5FI: above 50-day SMA · S5TH (gold): above 200-day SMA. Original percentage levels on one shared autoscale, not percentage returns.</p>
+        <p class="muted small">External chart · its range controls are independent of the native comparisons above.</p>
+        <iframe id="breadth-chart" title="S&amp;P 500 constituent breadth: 50-day and 200-day SMA percentages" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" loading="lazy"></iframe>
+        <p class="muted small">Data and history methodology are provided by TradingView/Barchart. TradingView receives this site's hostname and ordinary browser/IP metadata; no account data is passed. Availability is controlled by the provider. If the chart is blank or blocked, use the source links below.</p>
+        <div class="small"><a href="https://www.tradingview.com/symbols/INDEX-S5FI/" target="_blank" rel="noopener noreferrer">50-day breadth</a> · <a href="https://www.tradingview.com/symbols/INDEX-S5TH/" target="_blank" rel="noopener noreferrer">200-day breadth</a> by TradingView</div>
+      </div>
+    </section>
+
     <section class="card chart-card" id="card-kalshi">
       <div class="card-head macro-head">
         <h2 id="kalshi-title">Fed decision odds (Kalshi)</h2>

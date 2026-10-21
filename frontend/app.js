@@ -49,6 +49,8 @@
       $("#skew-source").textContent = src.skew ? `source: ${src.skew.source}, through ${src.skew.last_date}` : "";
       if (!$("#scenario-select").value) loadFilters();
     } catch (err) {
+      Object.keys(state.charts).filter((key) => key.startsWith("mini-charts:")).forEach(clearSeriesChart);
+      $("#mini-charts").querySelectorAll(".mini-stats").forEach((el) => { el.textContent = "unavailable · update failed"; });
       $("#regime-body").innerHTML = `<div class="error-text">Could not load index data: ${esc(err.message)}</div>`;
     }
   }
@@ -83,9 +85,13 @@
       const m = entry.metrics || {};
       const unit = entry.unit || defaultUnit || "index";
       const el = document.getElementById(`${containerId}-stats-${name}`);
-      if (entry.error) { el.innerHTML = `<span class="muted small">unavailable</span>`; return; }
+      if (entry.error || !entry.series?.length) {
+        clearSeriesChart(`${containerId}:${name}`);
+        el.innerHTML = `<span class="muted small">unavailable</span>`;
+        return;
+      }
       const chg = m.change_1d;
-      const source = entry.source ? `<span class="sub" title="${esc(entry.source)}">${esc(String(entry.source).split(":")[0])}</span>` : "";
+      const source = entry.source ? `<span class="sub" title="${esc(entry.source)}">${esc(entry.source)} · ${esc(m.date || entry.series.at(-1)?.d || "date unavailable")}</span>` : "";
       el.innerHTML = `
         <div class="main"><span class="value">${fmtValue(m.value, unit)}</span><span class="sub ${chg > 0 ? "up" : chg < 0 ? "down" : ""}">${fmtChange(chg, unit, m.value)} 1d</span></div>
         <div class="row"><span class="sub">${fmtChange(m.change_5d, unit, m.value)} 5d</span><span class="sub">pctl ${num(m.percentile, 0)}</span><span class="sub">52w ${fmtRange(m.low_52w, m.high_52w, unit)}</span>${source}</div>`;
@@ -141,11 +147,18 @@
       }
       const ctl = {
         id: section.id, card: node, curve: !!section.curve, chartMode: section.chart_mode, range: null, timer: null, data: null, inflight: false,
-        storageKey: `trade-plat.liveRange.${section.id}`, defaultRange: section.hidden ? "1y" : (defaultRange || "1d"),
+        groups: section.groups || [], ranges: section.ranges,
+        storageKey: `trade-plat.liveRange.${section.id}`, defaultRange: section.hidden ? "1y" : (section.default_range || defaultRange || "1d"),
         variantsKey: `trade-plat.liveVariants.${section.id}`, variants: {},
         symbolsKey: `trade-plat.liveSymbols.${section.id}`, symbols: null, defaultSymbols: null,
-        render: section.id === "vix" ? renderVixLive : null,
+        render: section.id === "vix" ? renderVixLive : section.groups?.length ? renderComparisons : null,
       };
+      if (ctl.groups.length) {
+        node.classList.add("comparison-section");
+        node.querySelector(".range-buttons").innerHTML = ctl.ranges.map((range) => `<button data-range="${esc(range)}">${esc(range.toUpperCase())}</button>`).join("");
+        const breadth = document.getElementById("card-breadth");
+        if (breadth) node.after(breadth);
+      }
       try { ctl.variants = JSON.parse(localStorage.getItem(ctl.variantsKey) || "{}"); } catch (e) { ctl.variants = {}; }
       if (Array.isArray(section.symbols)) initSymbolEditor(ctl, section.symbols);
       node.querySelectorAll(".range-buttons button").forEach((btn) => {
@@ -162,6 +175,20 @@
       });
       liveSections.set(section.id, ctl);
     });
+    const breadth = document.getElementById("breadth-chart");
+    if (breadth) {
+      const configuration = {
+        symbols: [["Above 50-day SMA", "INDEX:S5FI|1D"]],
+        compareSymbol: {symbol: "INDEX:S5TH", lineColor: "#f5a524", lineWidth: 2},
+        chartOnly: false, autosize: true, width: "100%", height: "100%", locale: "en",
+        colorTheme: "dark", showVolume: false, showMA: false,
+        hideDateRanges: false, hideMarketStatus: true, hideSymbolLogo: true,
+        scalePosition: "right", scaleMode: "Normal", valuesTracking: "1",
+        changeMode: "price-only", chartType: "line", lineWidth: 2, lineType: 0,
+        dateRanges: ["12m|1D", "3m|1D", "60m|1D"],
+      };
+      breadth.src = "https://www.tradingview-widget.com/embed-widget/symbol-overview/?locale=en#" + encodeURIComponent(JSON.stringify(configuration));
+    }
   }
 
   // Symbol sections (e.g. stocks) chart a ticker list the user can edit; the list is kept per browser and
@@ -204,7 +231,7 @@
     if (!ctl.range) {
       let saved = null;
       try { saved = localStorage.getItem(ctl.storageKey); } catch (e) { /* ignore */ }
-      ctl.range = saved || ctl.defaultRange;
+      ctl.range = saved && (!ctl.ranges || ctl.ranges.includes(saved)) ? saved : ctl.defaultRange;
     }
     return ctl.range;
   }
@@ -222,6 +249,12 @@
       (ctl.render || renderLiveSection)(ctl, data);
       scheduleLiveRefresh(ctl, ((data.refresh_seconds || data.live_ttl_seconds || 55) * 1000) + 300);
     } catch (err) {
+      if (ctl.groups.length) {
+        ctl.data = null;
+        renderComparisons(ctl, {items: {}, error: `Update failed: ${err.message}`});
+        scheduleLiveRefresh(ctl, 30000);
+        return;
+      }
       // A failed poll must not leave percentage or spread charts looking current.
       const percentChart = ctl.chartMode === "percent_change";
       ctl.card.querySelectorAll(".chart-baseline").forEach((el) => { el.textContent = ""; });
@@ -352,6 +385,112 @@
     setSummary(ctl.card.id, names.filter((n) => !items[n].error).map((n) => `${n} ${fmtValue(items[n].metrics.value, items[n].unit)}`).join(" · "));
   }
 
+  function renderComparisons(ctl, data) {
+    const container = ctl.card.querySelector(".macro-grid");
+    if (!container.dataset.built) {
+      container.innerHTML = ctl.groups.map((group) => `
+        <div class="macro-card comparison-card" data-group="${esc(group.id)}">
+          <div class="mini-head"><h3>${esc(group.title)}</h3><span class="live-badge off">DAILY</span></div>
+          <div class="comparison-message muted small" role="status"></div>
+          <div class="macro-chart"><canvas id="comparison-${domKey(ctl.id)}-${domKey(group.id)}"></canvas></div>
+          <div class="comparison-sources small"></div>
+          <p class="comparison-note muted small">${esc(group.note || "")} Gaps indicate no observation; no interpolation.</p>
+        </div>`).join("");
+      container.dataset.built = "true";
+    }
+    ctl.groups.forEach((group, groupIndex) => {
+      const card = container.children[groupIndex];
+      const chartKey = `comparison:${ctl.id}:${group.id}`;
+      clearSeriesChart(chartKey);
+      const priceChange = group.mode === "price_change";
+      const entries = group.series.map((name) => data.items?.[name] || {});
+      const values = entries.map((entry) => new Map((entry.error ? [] : entry.series || []).filter((point) =>
+        point && typeof point.t === "string" && /^\d{4}-\d{2}-\d{2}$/.test(point.t)
+      ).map((point) => [point.t, Number.isFinite(point.v) && (!priceChange || point.v > 0) ? point.v : null])));
+      const missing = group.series.filter((_, i) => ![...values[i].values()].some(Number.isFinite));
+      let dates = [...new Set(values.flatMap((series) => [...series.keys()]))].sort();
+      const baseline = priceChange ? dates.find((day) => values.every((series) => Number.isFinite(series.get(day)))) : null;
+      if (priceChange && baseline) dates = dates.filter((day) => day >= baseline);
+      card.querySelector(".comparison-sources").innerHTML = entries.map((entry, i) => {
+        const metrics = entry.metrics || {};
+        const isMissing = missing.includes(group.series[i]);
+        const lastPrice = priceChange ? [...values[i]].filter(([, value]) => Number.isFinite(value)).at(-1) : null;
+        const observation = lastPrice?.[0] || metrics.as_of || entry.daily_last_date || metrics.daily_last_date;
+        return `<div><b>${esc(entry.label || group.series[i])}</b>: ${isMissing ? "unavailable" : fmtValue(priceChange ? lastPrice?.[1] : metrics.value, entry.unit)}${!priceChange && !isMissing && metrics.change != null ? ` · ${fmtChange(metrics.change, "pct")} vs previous observation` : ""}<br><span class="muted">${esc(entry.daily_source || "source unavailable")} · as of ${esc(observation || "unavailable")}</span></div>`;
+      }).join("");
+      let error = data.error || (typeof Chart === "undefined" ? "Chart library unavailable" : "");
+      if (!error && priceChange && (missing.length || !baseline)) error = missing.length ? `Missing series: ${missing.join(", ")}` : "No common date with valid positive prices";
+      if (!error && missing.length === group.series.length) error = "All series unavailable";
+      card.querySelector(".comparison-message").textContent = error ? `Comparison unavailable · ${error}` : priceChange
+        ? `Price change (%) · shared baseline ${baseline}`
+        : `Yield / policy rate (%)${missing.length ? ` · Missing series: ${missing.join(", ")}` : ""}`;
+      if (error) return;
+      const bounds = group.target_bounds || [];
+      const colors = ["#38bdf8", "#f5a524", "#a78bfa", "#5eead4", "#5eead4"];
+      const datasets = group.series.map((name, i) => ({
+        label: entries[i].label || name,
+        data: dates.map((day) => {
+          const value = values[i].get(day);
+          return Number.isFinite(value) ? priceChange ? (value / values[i].get(baseline) - 1) * 100 : value : null;
+        }),
+        borderColor: colors[i % colors.length], borderWidth: 1.7,
+        pointBackgroundColor: colors[i % colors.length],
+        pointRadius: (context) => {
+          const points = context.dataset.data, index = context.dataIndex;
+          return Number.isFinite(points[index]) && !Number.isFinite(points[index - 1]) && !Number.isFinite(points[index + 1]) ? 3 : 0;
+        },
+        pointHitRadius: 10,
+        tension: 0, spanGaps: false, fill: false,
+        stepped: bounds.includes(name) ? "before" : false,
+        borderDash: name === bounds[0] ? [5, 4] : name === bounds[1] ? [2, 3] : [],
+      }));
+      const band = {
+        id: "targetBand",
+        beforeDatasetsDraw(chart) {
+          const lower = datasets[group.series.indexOf(bounds[0])]?.data;
+          const upper = datasets[group.series.indexOf(bounds[1])]?.data;
+          if (!lower || !upper || !bounds.every((name) => chart.isDatasetVisible(group.series.indexOf(name)))) return;
+          const {ctx, scales: {x, y}, chartArea: area} = chart;
+          ctx.save();
+          ctx.beginPath(); ctx.rect(area.left, area.top, area.width, area.height); ctx.clip();
+          ctx.fillStyle = "rgba(94,234,212,0.10)";
+          for (let i = 0; i < dates.length - 1; i++) {
+            if (![lower[i], upper[i], lower[i + 1], upper[i + 1]].every(Number.isFinite) || lower[i] > upper[i]) continue;
+            const left = x.getPixelForValue(i), top = y.getPixelForValue(upper[i]);
+            ctx.fillRect(left, top, x.getPixelForValue(i + 1) - left, y.getPixelForValue(lower[i]) - top);
+          }
+          ctx.restore();
+        },
+      };
+      state.charts[chartKey] = new Chart(card.querySelector("canvas"), {
+        type: "line", plugins: [band, crosshairPlugin], data: {labels: dates, datasets},
+        options: {
+          animation: false, responsive: true, maintainAspectRatio: false,
+          interaction: {mode: "index", intersect: false},
+          plugins: {
+            legend: {display: true, position: "bottom", labels: {color: "#e6edf3", boxWidth: 20, boxHeight: 2, font: {size: 11}}},
+            crosshair: {format: (value) => `${num(value, 2)}%`},
+            tooltip: {callbacks: {
+              title: (items) => items[0]?.label || "",
+              label: (item) => `${item.dataset.label}: ${priceChange ? signed(item.parsed.y, 2) : num(item.parsed.y, 3)}%${priceChange ? ` (${fmtPrecise(values[item.datasetIndex].get(item.label), entries[item.datasetIndex].unit)})` : ""}`,
+              afterBody: (items) => {
+                const day = items[0]?.label;
+                return group.series.filter((_, i) => !Number.isFinite(values[i].get(day))).map((name) => `${name}: no observation`);
+              },
+            }},
+          },
+          scales: {
+            x: {ticks: {color: "#8b98a8", maxTicksLimit: (context) => context.chart.width < 400 ? 2 : 5, maxRotation: 0, font: {size: 10}}, grid: {color: "#263241"}},
+            y: {title: {display: true, text: priceChange ? "Price change (%)" : "Rate (%)", color: "#8b98a8"}, ticks: {color: "#8b98a8", maxTicksLimit: 6, callback: (value) => `${num(value, 2)}%`}, grid: {color: "#263241"}},
+          },
+        },
+      });
+    });
+    ctl.card.querySelector(".live-status").textContent = data.error || `DAILY · ${data.window_start || ""} – ${data.window_end || ""} · native chart ranges`;
+    ctl.card.querySelector(".curve-summary").textContent = "";
+    setSummary(ctl.card.id, data.error ? "Comparison update unavailable" : "SMH / KOSPI · Treasury / Fed · daily observations");
+  }
+
   // VIX card: live Longbridge quote + intraday/daily series from the hidden "vix" live section.
   function renderVixLive(ctl, data) {
     const entry = (data.items || {}).VIX;
@@ -403,7 +542,7 @@
 
       if (active.length) {
         const el = active[0].element;
-        ctx.fillStyle = chart.data.datasets[0].borderColor;
+        ctx.fillStyle = chart.data.datasets[active[0].datasetIndex].borderColor;
         ctx.beginPath(); ctx.arc(el.x, el.y, 3.5, 0, Math.PI * 2); ctx.fill();
         ctx.strokeStyle = "#0f1419"; ctx.stroke();
       }
@@ -633,7 +772,8 @@
     }
     const palette = ["#f97316", "#a78bfa", "#f472b6", "#34d399", "#60a5fa", "#facc15"];
     Object.entries(state.market.indices || {}).forEach(([name, data], i) => {
-      if (data.series && data.series.length) drawChart(`mini-charts:${name}`, `#mini-charts-chart-${name}`, data.series, palette[i % palette.length], [], null, true);
+      if (!data.error && data.series?.length) drawChart(`mini-charts:${name}`, `#mini-charts-chart-${name}`, data.series, palette[i % palette.length], [], null, true);
+      else clearSeriesChart(`mini-charts:${name}`);
     });
   }
 
@@ -1166,6 +1306,133 @@
     setSummary("watchlist-card", items.filter((it) => it.iv_rank && it.iv_rank.value != null).map((it) => `${it.ticker} ${num(it.iv_rank.value, 0)}`).join(" · ") || `${items.length} tickers`);
   }
 
+  const chinaEtfsState = { data: null, inflight: false, timer: null, refreshSeconds: 300, nextRefreshAt: 0, summary: "Loading fund reference data..." };
+  const chinaEtfNumber = (value, decimals, suffix = "") => Number.isFinite(value) ? num(value, decimals, suffix) : "-";
+  const chinaEtfDetail = (text, warning = false) => text ? `<div class="small ${warning ? "china-etfs-warning" : "muted"}">${esc(text)}</div>` : "";
+
+  function chinaEtfLink(url, label) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "https:" && !parsed.username && !parsed.password) {
+        return `<a href="${esc(parsed.href)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`;
+      }
+    } catch (err) { return esc(label); }
+    return esc(label);
+  }
+
+  function chinaEtfDetails(part, missing, sourceLabel = "Source") {
+    const status = [part.status === "stale" ? "Stale" : "", part.status === "unavailable" || missing ? "Unavailable" : ""].filter(Boolean).join(" · ");
+    const source = part.source_url ? chinaEtfLink(part.source_url, sourceLabel) : `${esc(sourceLabel)} -`;
+    return `${chinaEtfDetail(status, true)}${chinaEtfDetail(part.note)}
+      <div class="muted small">${source} · retrieved ${esc(part.retrieved_at || "-")}</div>`;
+  }
+
+  function chinaEtfRow(item) {
+    const close = item.close, nav = item.nav, profile = item.profile;
+    const management = profile.management_fee_pct, custody = profile.custody_fee_pct;
+    const feesKnown = Number.isFinite(management) && Number.isFinite(custody);
+    const feeder = item.code === "161130";
+    const feederNote = "Feeder headline rates; not all-in expenses.";
+    const warnings = [...new Set(item.warnings || [])].filter((note) => !feeder || note !== feederNote);
+    const dateMismatch = close.date && nav.date && close.date !== nav.date;
+    const premiumKnown = Number.isFinite(item.premium_pct);
+    return `<tr>
+      <td class="left">
+        <b lang="zh-CN">${chinaEtfLink(item.fund_url, item.name || "-")}</b>
+        ${chinaEtfDetail(`${item.code || "-"} · ${item.exchange || "-"} · ${item.kind || "-"}`)}
+        ${warnings.map((note) => chinaEtfDetail(note, true)).join("")}
+      </td>
+      <td><b>${chinaEtfNumber(close.value, 3)}</b>
+        ${chinaEtfDetail(`Close date ${close.date || "-"}`)}
+        ${chinaEtfDetails(close, !Number.isFinite(close.value))}
+      </td>
+      <td><b>${chinaEtfNumber(nav.value, 4)}</b>
+        ${chinaEtfDetail(`Unit NAV date ${nav.date || "-"}`)}
+        ${chinaEtfDetails(nav, !Number.isFinite(nav.value))}
+      </td>
+      <td><b class="${premiumKnown && item.premium_pct > 0 ? "china-etfs-premium" : ""}">${premiumKnown ? `${signed(item.premium_pct, 2)}%` : "-"}</b>
+        ${dateMismatch ? chinaEtfDetail(`Dates differ: close ${close.date}; NAV ${nav.date}.`, true) : ""}
+        ${premiumKnown && (close.status === "stale" || nav.status === "stale") ? chinaEtfDetail("Uses stale reference data", true) : ""}
+        ${chinaEtfDetail(dateMismatch && premiumKnown ? "Reference only, not live fair value." : item.premium_note || (premiumKnown ? "" : "Reference unavailable"))}
+      </td>
+      <td><b>${feesKnown ? chinaEtfNumber(management + custody, 2, "%") : "-"}</b>
+        ${chinaEtfDetail(`Management ${chinaEtfNumber(management, 2, "%")} + custody ${chinaEtfNumber(custody, 2, "%")}`)}
+        ${feeder ? chinaEtfDetail(feederNote, true) : ""}
+        ${chinaEtfDetail(profile.fee_note)}
+        ${profile.fee_source_url ? `<div class="small">${chinaEtfLink(profile.fee_source_url, "Fee-base disclosure")}</div>` : ""}
+        ${chinaEtfDetails(profile, !feesKnown, "Profile source")}
+      </td>
+      <td><b>${Number.isFinite(profile.aum_cny) ? chinaEtfNumber(profile.aum_cny / 1e9, 3) : "-"}</b>
+        ${chinaEtfDetail(`Reported ${profile.aum_date || "-"}`)}
+        ${chinaEtfDetail(`Scope: ${profile.aum_scope || "-"}`)}
+        ${chinaEtfDetails(profile, !Number.isFinite(profile.aum_cny), "Profile source")}
+      </td>
+    </tr>`;
+  }
+
+  function setChinaEtfsStatus(message) {
+    chinaEtfsState.summary = message;
+    $("#china-etfs-meta").textContent = message;
+    setSummary("card-china-etfs", message);
+  }
+
+  function renderChinaEtfs(data) {
+    const items = data.items || [];
+    const rows = ["Nasdaq-100", "S&P 500"].map((index) => {
+      const group = items.filter((item) => item.index === index);
+      return group.length ? `<tbody><tr class="china-etfs-group"><th colspan="6" scope="rowgroup">${esc(index)}</th></tr>${group.map(chinaEtfRow).join("")}</tbody>` : "";
+    }).join("");
+    $("#china-etfs-table").innerHTML = `<table aria-label="Mainland China US-index ETFs and LOFs">
+      <thead><tr><th scope="col">Fund name</th><th scope="col">Previous close (CNY)</th><th scope="col">NAV (CNY)</th><th scope="col">Premium (reference)</th><th scope="col">Fees (annual)</th><th scope="col">AUM (CNY bn)</th></tr></thead>
+      ${rows || `<tbody><tr><td colspan="6" class="left empty">${data.refreshing ? "Loading fund reference data; backend refreshing..." : "Fund reference data unavailable."}</td></tr></tbody>`}
+    </table>`;
+    const partial = items.some((item) => [item.close.value, item.nav.value, item.premium_pct, item.profile.management_fee_pct, item.profile.custody_fee_pct, item.profile.aum_cny].some((value) => !Number.isFinite(value)) || [item.close, item.nav, item.profile].some((part) => part.status === "unavailable"));
+    const stale = items.filter((item) => [item.close, item.nav, item.profile].some((part) => part.status === "stale")).length;
+    const available = items.some((item) => [item.close.value, item.nav.value, item.profile.management_fee_pct, item.profile.custody_fee_pct, item.profile.aum_cny].some(Number.isFinite));
+    setChinaEtfsStatus([
+      `${items.length} funds`,
+      !available ? "Data unavailable" : partial ? "Partial data; missing fields shown as -" : "Reference data loaded",
+      stale ? `${stale} funds with stale fields` : "",
+      data.refreshing ? "Backend refreshing; checking every 3s while visible" : "Checks every 300s while visible; Refresh uses server cache",
+      `Snapshot ${data.generated_at || "-"}`,
+    ].filter(Boolean).join(" · "));
+  }
+
+  function scheduleChinaEtfsRefresh() {
+    clearTimeout(chinaEtfsState.timer);
+    chinaEtfsState.timer = null;
+    if (chinaEtfsState.inflight || document.visibilityState !== "visible" || $("#card-china-etfs").classList.contains("collapsed")) return;
+    chinaEtfsState.timer = setTimeout(loadChinaEtfs, Math.max(0, chinaEtfsState.nextRefreshAt - Date.now()));
+  }
+
+  async function loadChinaEtfs() {
+    if (chinaEtfsState.inflight || document.visibilityState !== "visible") return;
+    clearTimeout(chinaEtfsState.timer);
+    chinaEtfsState.inflight = true;
+    $("#china-etfs-refresh").disabled = true;
+    $("#china-etfs-table").setAttribute("aria-busy", "true");
+    setChinaEtfsStatus(chinaEtfsState.data ? "Checking fund reference data; displayed snapshot may be stale..." : "Loading fund reference data...");
+    try {
+      const data = await api("/api/china-etfs");
+      renderChinaEtfs(data);
+      chinaEtfsState.data = data;
+      chinaEtfsState.refreshSeconds = data.refreshing ? 3 : 300;
+    } catch (err) {
+      if (!chinaEtfsState.data) $("#china-etfs-table").innerHTML = `<div class="empty">Fund reference data unavailable. Use Refresh to retry.</div>`;
+      setChinaEtfsStatus(`Update unavailable; ${chinaEtfsState.data ? `showing last loaded snapshot ${chinaEtfsState.data.generated_at || "-"} (may be stale)` : "no reference data loaded"}. ${err.message}`);
+      chinaEtfsState.refreshSeconds = 300;
+    } finally {
+      chinaEtfsState.inflight = false;
+      $("#china-etfs-refresh").disabled = false;
+      $("#china-etfs-table").setAttribute("aria-busy", "false");
+      chinaEtfsState.nextRefreshAt = Date.now() + Math.max(3, chinaEtfsState.refreshSeconds) * 1000;
+      scheduleChinaEtfsRefresh();
+    }
+  }
+
+  $("#china-etfs-refresh").addEventListener("click", loadChinaEtfs);
+  document.addEventListener("visibilitychange", scheduleChinaEtfsRefresh);
+
   // ------------------------------------------------------------------ fold / unfold
   const FOLD_KEY = "trade-plat.folded";
 
@@ -1186,6 +1453,7 @@
       requestAnimationFrame(() => Object.values(state.charts).forEach((ch) => { if (card.contains(ch.canvas)) ch.resize(); }));
       liveSections.forEach((ctl) => { if (ctl.card === card && ctl.data) loadLiveSection(ctl); });
     }
+    if (card.id === "card-china-etfs") scheduleChinaEtfsRefresh();
   }
 
   function setSummary(cardId, text) {
@@ -1364,7 +1632,7 @@
   }
 
   // ------------------------------------------------------------------ section navigation
-  const NAV_LABELS = { "card-vix": "VIX", "card-skew": "SKEW", "card-fg": "Fear & Greed", "card-volcomplex": "Vol complex", "card-stocks": "Stocks", "card-global_equities": "Global equities", "card-macro": "Rates", "card-commodities": "Commodities", "card-kalshi": "Fed odds", "card-kalshi-december_hikes": "December hikes", "regime-card": "Regime", "watchlist-card": "Watchlist", "card-screener": "Screener" };
+  const NAV_LABELS = { "card-vix": "VIX", "card-skew": "SKEW", "card-fg": "Fear & Greed", "card-volcomplex": "Vol complex", "card-stocks": "Stocks", "card-comparisons": "Comparisons", "card-china-etfs": "China ETFs / LOFs", "card-breadth": "S&P 500 breadth", "card-global_equities": "Global equities", "card-macro": "Rates", "card-commodities": "Commodities", "card-kalshi": "Fed odds", "card-kalshi-december_hikes": "December hikes", "regime-card": "Regime", "watchlist-card": "Watchlist", "card-screener": "Screener" };
 
   function initNav() {
     const nav = $("#section-nav");
@@ -1388,6 +1656,7 @@
 
   // ------------------------------------------------------------------ init
   async function init() {
+    loadChinaEtfs();
     try {
       state.config = await api("/api/config");
       buildLiveSections(state.config.live_sections, state.config.live_default_range);
@@ -1404,6 +1673,7 @@
       $("#scan-hint").innerHTML = `<span class="error-text">${esc(err.message)}</span>`;
     }
     initFolding();
+    setSummary("card-china-etfs", chinaEtfsState.summary);
     initKalshi(state.config && state.config.kalshi_charts);
     initNav();
     await loadMarket();

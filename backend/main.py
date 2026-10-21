@@ -20,6 +20,7 @@ from backend.analytics.regime import SCENARIO_BY_KEY, SCENARIOS
 from backend.config import settings
 from backend.jobs import DailySnapshotScheduler, IvRankResolver, IvRefreshService, JobManager, MarketService, ScanService, ticker_of
 from backend.logging_setup import setup_logging
+from backend.market_data.china_etfs import ChinaEtfService
 from backend.market_data.fear_greed import FearGreedProvider
 from backend.market_data.indices import IndexHistoryProvider
 from backend.market_data.kalshi import RANGES as KALSHI_RANGES, KalshiService
@@ -38,6 +39,7 @@ db = Database(settings.db_file)
 macro = MacroService(settings, indices, client)
 market = MarketService(settings, indices, fear_greed, live_vix=lambda: macro.live_value("vix", "VIX"))
 kalshi = KalshiService(settings)
+china_etfs = ChinaEtfService()
 iv_ranks = IvRankResolver(settings, indices, db, client)
 scanner = ScanService(settings, client, market, db, iv_ranks)
 jobs = JobManager(scanner, IvRefreshService(settings, client, scanner, iv_ranks, db), db)
@@ -57,9 +59,12 @@ async def lifespan(_: FastAPI):
         scheduler.start()
     else:
         log.info("Daily IV snapshot scheduler not started: Longbridge credentials missing")
-    yield
-    warmer.stop()
-    scheduler.stop()
+    try:
+        yield
+    finally:
+        warmer.stop()
+        scheduler.stop()
+        await china_etfs.close()
 
 
 class CacheWarmer:
@@ -188,6 +193,8 @@ def api_macro(range: str = "1d", section: str = "macro", variants: Optional[str]
     section_cfg = next((s for s in macro.sections() if s["id"] == section), None)
     if section_cfg is None:
         raise HTTPException(status_code=404, detail=f"unknown live section {section!r}")
+    if range.lower() not in section_cfg["ranges"]:
+        raise HTTPException(status_code=400, detail=f"range must be one of {', '.join(section_cfg['ranges'])} for section {section!r}")
     chosen = {}
     for part in (variants or "").split(","):
         if ":" in part:
@@ -268,6 +275,11 @@ def api_recommendations():
     if result is None:
         return JSONResponse(status_code=404, content={"detail": "no scan has completed yet"})
     return result
+
+
+@app.get("/api/china-etfs")
+async def api_china_etfs():
+    return await china_etfs.snapshot()
 
 
 @app.get("/api/watchlist")
