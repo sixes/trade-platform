@@ -12,6 +12,11 @@
       <h1>Trade Plat</h1>
       <span class="subtitle">VIX / SKEW / Fear &amp; Greed regime &amp; US put screener</span>
     </div>
+    <div class="tab-bar" id="tab-bar">
+      <button class="tab-btn active" data-tab="markets">Markets</button>
+      <button class="tab-btn" data-tab="china">China</button>
+      <button class="tab-btn" data-tab="config">Config</button>
+    </div>
     <nav id="section-nav" class="section-nav" aria-label="Sections"></nav>
     <div class="topbar-right">
       <button id="fold-charts" class="btn small" type="button" title="Fold or unfold every chart card">Fold charts</button>
@@ -32,235 +37,269 @@
   </div>
 
   <main>
-    <section class="grid-3">
-      <article class="card chart-card" id="card-vix">
+    <div class="tab-pane active" id="tab-markets">
+      <section class="grid-3">
+        <article class="card chart-card" id="card-vix">
+          <div class="card-head">
+            <h2>CBOE VIX</h2>
+            <div class="range-buttons" id="vix-ranges">
+              <button data-range="1d">1D</button>
+              <button data-range="5d">5D</button>
+              <button data-range="3m">3M</button>
+              <button data-range="6m">6M</button>
+              <button data-range="1y" class="active">1Y</button>
+              <button data-range="3y">3Y</button>
+              <button data-range="5y">5Y</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div id="vix-live" class="muted small live-line"></div>
+            <div id="vix-stats" class="stats"></div>
+            <div class="chart-wrap"><canvas id="vix-chart"></canvas></div>
+          </div>
+        </article>
+        <article class="card chart-card" id="card-skew">
+          <div class="card-head">
+            <h2>CBOE SKEW</h2>
+            <span id="skew-source" class="muted small"></span>
+          </div>
+          <div class="card-body">
+            <div id="skew-stats" class="stats"></div>
+            <div class="chart-wrap"><canvas id="skew-chart"></canvas></div>
+          </div>
+        </article>
+        <article class="card chart-card" id="card-fg">
+          <div class="card-head">
+            <h2>CNN Fear &amp; Greed</h2>
+            <span id="fg-source" class="muted small"></span>
+          </div>
+          <div class="card-body">
+            <div id="fg-stats" class="stats"></div>
+            <div class="chart-wrap chart-wrap-short"><canvas id="fg-chart"></canvas></div>
+            <div id="fg-components" class="components"></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="card chart-card" id="card-volcomplex">
         <div class="card-head">
-          <h2>CBOE VIX</h2>
-          <div class="range-buttons" id="vix-ranges">
+          <h2>Volatility Complex</h2>
+          <span id="term-structure" class="muted small"></span>
+        </div>
+        <div class="card-body">
+          <div id="mini-charts" class="mini-grid"></div>
+        </div>
+      </section>
+
+      <div id="live-sections"></div>
+
+      <section class="card chart-card breadth-card" id="card-breadth">
+        <div class="card-head">
+          <h2>S&amp;P 500 stocks above 50-day / 200-day SMA (%)</h2>
+        </div>
+        <div class="card-body">
+          <p class="breadth-description">S5FI: above 50-day SMA · S5TH (gold): above 200-day SMA. Original percentage levels on one shared autoscale, not percentage returns.</p>
+          <p class="muted small">External chart · its range controls are independent of the native comparisons above.</p>
+          <iframe id="breadth-chart" title="S&amp;P 500 constituent breadth: 50-day and 200-day SMA percentages" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" loading="lazy"></iframe>
+          <p class="muted small">Data and history methodology are provided by TradingView/Barchart. TradingView receives this site's hostname and ordinary browser/IP metadata; no account data is passed. Availability is controlled by the provider. If the chart is blank or blocked, use the source links below.</p>
+          <div class="small"><a href="https://www.tradingview.com/symbols/INDEX-S5FI/" target="_blank" rel="noopener noreferrer">50-day breadth</a> · <a href="https://www.tradingview.com/symbols/INDEX-S5TH/" target="_blank" rel="noopener noreferrer">200-day breadth</a> by TradingView</div>
+        </div>
+      </section>
+
+      <section class="card chart-card" id="card-kalshi">
+        <div class="card-head macro-head">
+          <h2 id="kalshi-title">Fed decision odds (Kalshi)</h2>
+          <div class="range-buttons" id="kalshi-ranges">
             <button data-range="1d">1D</button>
             <button data-range="5d">5D</button>
+            <button data-range="1m" class="active">1M</button>
+            <button data-range="3m">3M</button>
+            <button data-range="all">ALL</button>
+          </div>
+          <span id="kalshi-live" class="muted small"></span>
+          <span id="kalshi-event" class="muted small"></span>
+        </div>
+        <div class="card-body">
+          <div class="kalshi-body">
+            <div class="chart-wrap kalshi-chart"><canvas id="kalshi-chart"></canvas></div>
+            <div id="kalshi-table" class="table-wrap"></div>
+          </div>
+          <div id="kalshi-note" class="muted small"></div>
+        </div>
+      </section>
+
+      <section class="card chart-card" id="card-kalshi-december_hikes">
+        <div class="card-head macro-head">
+          <h2 id="kalshi-december_hikes-title">December Fed hike odds (Kalshi)</h2>
+          <div class="range-buttons" id="kalshi-december_hikes-ranges">
+            <button data-range="1d">1D</button>
+            <button data-range="5d">5D</button>
+            <button data-range="1m" class="active">1M</button>
+            <button data-range="3m">3M</button>
+            <button data-range="all">ALL</button>
+          </div>
+          <span id="kalshi-december_hikes-live" class="muted small"></span>
+          <span id="kalshi-december_hikes-event" class="muted small"></span>
+        </div>
+        <div class="card-body">
+          <div class="kalshi-body">
+            <div class="chart-wrap kalshi-chart"><canvas id="kalshi-december_hikes-chart"></canvas></div>
+            <div id="kalshi-december_hikes-table" class="table-wrap"></div>
+          </div>
+          <div id="kalshi-december_hikes-note" class="muted small"></div>
+        </div>
+      </section>
+
+      <template id="live-section-template">
+        <section class="card chart-card">
+          <div class="card-head macro-head">
+            <h2></h2>
+            <div class="range-buttons">
+              <button data-range="1d">1D</button>
+              <button data-range="5d">5D</button>
+              <button data-range="1m">1M</button>
+              <button data-range="3m">3M</button>
+              <button data-range="6m">6M</button>
+              <button data-range="1y">1Y</button>
+              <button data-range="5y">5Y</button>
+            </div>
+            <span class="muted small live-status"></span>
+            <span class="muted small curve-summary"></span>
+            <form class="symbol-editor hidden">
+              <input type="text" placeholder="Add US ticker(s), e.g. NVDA, TQQQ" maxlength="120" autocomplete="off" spellcheck="false" aria-label="Add ticker">
+              <button type="submit" class="btn small">Add</button>
+              <button type="button" class="btn small btn-ghost symbol-reset" title="Restore the default tickers from config.yaml">Reset</button>
+              <span class="muted small symbol-hint"></span>
+            </form>
+          </div>
+          <div class="card-body">
+            <div class="macro-grid"></div>
+          </div>
+        </section>
+      </template>
+
+      <section class="card" id="regime-card">
+        <div class="card-head">
+          <h2>Current Regime</h2>
+          <span id="regime-confidence" class="muted small"></span>
+        </div>
+        <div class="card-body">
+          <div id="regime-body" class="regime-body"></div>
+        </div>
+      </section>
+
+      <section class="card" id="watchlist-card">
+        <div class="card-head">
+          <h2>Watchlist IV Rank</h2>
+          <span id="watchlist-meta" class="muted small"></span>
+        </div>
+        <div class="card-body">
+          <form id="watchlist-form" class="scan-row">
+            <label>US tickers
+              <input id="watchlist-input" type="text" placeholder="SPY, QQQ, IWM, AAPL" autocomplete="off" spellcheck="false">
+            </label>
+            <button id="watchlist-btn" class="btn btn-primary" type="submit">Refresh IV</button>
+            <button id="watchlist-show" class="btn btn-ghost" type="button">Show stored</button>
+          </form>
+          <div id="watchlist-hint" class="muted small"></div>
+          <div id="watchlist-results" class="table-wrap"></div>
+        </div>
+      </section>
+
+      <section class="card" id="card-screener">
+        <div class="card-head">
+          <h2>Options Screener</h2>
+          <span id="scan-meta" class="muted small"></span>
+        </div>
+        <div class="card-body">
+          <form id="scan-form" class="scan-form">
+            <div class="scan-row">
+              <label>US tickers
+                <input id="symbols-input" type="text" placeholder="SPY, QQQ, IWM" autocomplete="off" spellcheck="false">
+              </label>
+              <label>Scenario
+                <select id="scenario-select"><option value="">Auto (from regime)</option></select>
+              </label>
+              <button id="scan-btn" class="btn btn-primary" type="submit">Scan options</button>
+            </div>
+            <fieldset class="filters">
+              <legend>Screener parameters <span id="filters-scenario" class="muted"></span></legend>
+              <div class="filters-grid">
+                <label>DTE min <input type="number" name="dte_min" min="1" max="730" step="1" required></label>
+                <label>DTE max <input type="number" name="dte_max" min="1" max="730" step="1" required></label>
+                <label>|Delta| min <input type="number" name="delta_min" min="0" max="1" step="0.01" required></label>
+                <label>|Delta| max <input type="number" name="delta_max" min="0" max="1" step="0.01" required></label>
+                <label>Min open interest <input type="number" name="min_open_interest" min="0" step="1" required></label>
+                <label>Max spread % <input type="number" name="max_spread_pct" min="0" max="100" step="0.5" required></label>
+                <label>Min annualized yield % <input type="number" name="min_annualized_yield_pct" min="0" step="0.5" placeholder="off"></label>
+                <label>Target |delta| <input type="number" name="target_delta" min="0" max="1" step="0.01" placeholder="off"></label>
+                <label>Target strike (optional) <input type="number" name="target_strike" min="0" step="any" placeholder="off"></label>
+                <label>Strike comparison
+                  <select name="strike_mode" disabled>
+                    <option value="exact">Exact (=)</option>
+                    <option value="lt">Less than (&lt;)</option>
+                    <option value="gt">Greater than (&gt;)</option>
+                  </select>
+                </label>
+                <label>Max results <input type="number" name="max_results" min="1" max="50" step="1" required></label>
+              </div>
+              <div class="filters-actions">
+                <span id="filters-state" class="muted small"></span>
+                <button id="filters-reset" class="btn btn-ghost small" type="button">Reset to scenario defaults</button>
+              </div>
+            </fieldset>
+          </form>
+          <div id="scan-hint" class="muted small"></div>
+          <div id="results"></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="tab-pane" id="tab-china">
+      <section class="card chart-card" id="card-china-futures">
+        <div class="card-head macro-head">
+          <h2>China Stock Index Futures vs Spot</h2>
+          <div class="range-buttons" id="china-futures-ranges">
+            <button data-range="1m">1M</button>
             <button data-range="3m">3M</button>
             <button data-range="6m">6M</button>
             <button data-range="1y" class="active">1Y</button>
             <button data-range="3y">3Y</button>
             <button data-range="5y">5Y</button>
           </div>
+          <span id="china-futures-status" class="muted small"></span>
         </div>
         <div class="card-body">
-          <div id="vix-live" class="muted small live-line"></div>
-          <div id="vix-stats" class="stats"></div>
-          <div class="chart-wrap"><canvas id="vix-chart"></canvas></div>
-        </div>
-      </article>
-      <article class="card chart-card" id="card-skew">
-        <div class="card-head">
-          <h2>CBOE SKEW</h2>
-          <span id="skew-source" class="muted small"></span>
-        </div>
-        <div class="card-body">
-          <div id="skew-stats" class="stats"></div>
-          <div class="chart-wrap"><canvas id="skew-chart"></canvas></div>
-        </div>
-      </article>
-      <article class="card chart-card" id="card-fg">
-        <div class="card-head">
-          <h2>CNN Fear &amp; Greed</h2>
-          <span id="fg-source" class="muted small"></span>
-        </div>
-        <div class="card-body">
-          <div id="fg-stats" class="stats"></div>
-          <div class="chart-wrap chart-wrap-short"><canvas id="fg-chart"></canvas></div>
-          <div id="fg-components" class="components"></div>
-        </div>
-      </article>
-    </section>
-
-    <section class="card chart-card" id="card-volcomplex">
-      <div class="card-head">
-        <h2>Volatility Complex</h2>
-        <span id="term-structure" class="muted small"></span>
-      </div>
-      <div class="card-body">
-        <div id="mini-charts" class="mini-grid"></div>
-      </div>
-    </section>
-
-    <div id="live-sections"></div>
-
-    <section class="card" id="card-china-etfs">
-      <div class="card-head">
-        <h2>Mainland China US-index ETFs / LOFs</h2>
-        <button id="china-etfs-refresh" class="btn small" type="button">Refresh</button>
-        <span id="china-etfs-meta" class="muted small" role="status" aria-live="polite">Loading fund reference data...</span>
-      </div>
-      <div class="card-body">
-        <div id="china-etfs-table" class="table-wrap" role="region" aria-label="Mainland China US-index fund reference data" tabindex="0">
-          <div class="empty">Loading fund reference data...</div>
-        </div>
-        <p class="muted small china-etfs-note">Reference premium (%) = (displayed completed close / latest published unit NAV − 1) × 100. Dates may differ; US valuation is not simultaneous. Not executable arbitrage. Fees are annual management + custody, not TER; retrieval dates are not fee effective dates. AUM is reported as dated, not realtime.</p>
-      </div>
-    </section>
-
-    <section class="card chart-card breadth-card" id="card-breadth">
-      <div class="card-head">
-        <h2>S&amp;P 500 stocks above 50-day / 200-day SMA (%)</h2>
-      </div>
-      <div class="card-body">
-        <p class="breadth-description">S5FI: above 50-day SMA · S5TH (gold): above 200-day SMA. Original percentage levels on one shared autoscale, not percentage returns.</p>
-        <p class="muted small">External chart · its range controls are independent of the native comparisons above.</p>
-        <iframe id="breadth-chart" title="S&amp;P 500 constituent breadth: 50-day and 200-day SMA percentages" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" loading="lazy"></iframe>
-        <p class="muted small">Data and history methodology are provided by TradingView/Barchart. TradingView receives this site's hostname and ordinary browser/IP metadata; no account data is passed. Availability is controlled by the provider. If the chart is blank or blocked, use the source links below.</p>
-        <div class="small"><a href="https://www.tradingview.com/symbols/INDEX-S5FI/" target="_blank" rel="noopener noreferrer">50-day breadth</a> · <a href="https://www.tradingview.com/symbols/INDEX-S5TH/" target="_blank" rel="noopener noreferrer">200-day breadth</a> by TradingView</div>
-      </div>
-    </section>
-
-    <section class="card chart-card" id="card-kalshi">
-      <div class="card-head macro-head">
-        <h2 id="kalshi-title">Fed decision odds (Kalshi)</h2>
-        <div class="range-buttons" id="kalshi-ranges">
-          <button data-range="1d">1D</button>
-          <button data-range="5d">5D</button>
-          <button data-range="1m" class="active">1M</button>
-          <button data-range="3m">3M</button>
-          <button data-range="all">ALL</button>
-        </div>
-        <span id="kalshi-live" class="muted small"></span>
-        <span id="kalshi-event" class="muted small"></span>
-      </div>
-      <div class="card-body">
-        <div class="kalshi-body">
-          <div class="chart-wrap kalshi-chart"><canvas id="kalshi-chart"></canvas></div>
-          <div id="kalshi-table" class="table-wrap"></div>
-        </div>
-        <div id="kalshi-note" class="muted small"></div>
-      </div>
-    </section>
-
-    <section class="card chart-card" id="card-kalshi-december_hikes">
-      <div class="card-head macro-head">
-        <h2 id="kalshi-december_hikes-title">December Fed hike odds (Kalshi)</h2>
-        <div class="range-buttons" id="kalshi-december_hikes-ranges">
-          <button data-range="1d">1D</button>
-          <button data-range="5d">5D</button>
-          <button data-range="1m" class="active">1M</button>
-          <button data-range="3m">3M</button>
-          <button data-range="all">ALL</button>
-        </div>
-        <span id="kalshi-december_hikes-live" class="muted small"></span>
-        <span id="kalshi-december_hikes-event" class="muted small"></span>
-      </div>
-      <div class="card-body">
-        <div class="kalshi-body">
-          <div class="chart-wrap kalshi-chart"><canvas id="kalshi-december_hikes-chart"></canvas></div>
-          <div id="kalshi-december_hikes-table" class="table-wrap"></div>
-        </div>
-        <div id="kalshi-december_hikes-note" class="muted small"></div>
-      </div>
-    </section>
-
-    <template id="live-section-template">
-      <section class="card chart-card">
-        <div class="card-head macro-head">
-          <h2></h2>
-          <div class="range-buttons">
-            <button data-range="1d">1D</button>
-            <button data-range="5d">5D</button>
-            <button data-range="1m">1M</button>
-            <button data-range="3m">3M</button>
-            <button data-range="6m">6M</button>
-            <button data-range="1y">1Y</button>
-            <button data-range="5y">5Y</button>
-          </div>
-          <span class="muted small live-status"></span>
-          <span class="muted small curve-summary"></span>
-          <form class="symbol-editor hidden">
-            <input type="text" placeholder="Add US ticker(s), e.g. NVDA, TQQQ" maxlength="120" autocomplete="off" spellcheck="false" aria-label="Add ticker">
-            <button type="submit" class="btn small">Add</button>
-            <button type="button" class="btn small btn-ghost symbol-reset" title="Restore the default tickers from config.yaml">Reset</button>
-            <span class="muted small symbol-hint"></span>
-          </form>
-        </div>
-        <div class="card-body">
-          <div class="macro-grid"></div>
+          <div class="macro-grid" id="china-futures-grid"></div>
         </div>
       </section>
-    </template>
 
-    <section class="card" id="regime-card">
-      <div class="card-head">
-        <h2>Current Regime</h2>
-        <span id="regime-confidence" class="muted small"></span>
-      </div>
-      <div class="card-body">
-        <div id="regime-body" class="regime-body"></div>
-      </div>
-    </section>
-
-    <section class="card" id="watchlist-card">
-      <div class="card-head">
-        <h2>Watchlist IV Rank</h2>
-        <span id="watchlist-meta" class="muted small"></span>
-      </div>
-      <div class="card-body">
-        <form id="watchlist-form" class="scan-row">
-          <label>US tickers
-            <input id="watchlist-input" type="text" placeholder="SPY, QQQ, IWM, AAPL" autocomplete="off" spellcheck="false">
-          </label>
-          <button id="watchlist-btn" class="btn btn-primary" type="submit">Refresh IV</button>
-          <button id="watchlist-show" class="btn btn-ghost" type="button">Show stored</button>
-        </form>
-        <div id="watchlist-hint" class="muted small"></div>
-        <div id="watchlist-results" class="table-wrap"></div>
-      </div>
-    </section>
-
-    <section class="card" id="card-screener">
-      <div class="card-head">
-        <h2>Options Screener</h2>
-        <span id="scan-meta" class="muted small"></span>
-      </div>
-      <div class="card-body">
-        <form id="scan-form" class="scan-form">
-          <div class="scan-row">
-            <label>US tickers
-              <input id="symbols-input" type="text" placeholder="SPY, QQQ, IWM" autocomplete="off" spellcheck="false">
-            </label>
-            <label>Scenario
-              <select id="scenario-select"><option value="">Auto (from regime)</option></select>
-            </label>
-            <button id="scan-btn" class="btn btn-primary" type="submit">Scan options</button>
+      <section class="card" id="card-china-etfs">
+        <div class="card-head">
+          <h2>Mainland China US-index ETFs / LOFs</h2>
+          <button id="china-etfs-refresh" class="btn small" type="button">Refresh</button>
+          <span id="china-etfs-meta" class="muted small" role="status" aria-live="polite">Loading fund reference data...</span>
+        </div>
+        <div class="card-body">
+          <div id="china-etfs-table" class="table-wrap" role="region" aria-label="Mainland China US-index fund reference data" tabindex="0">
+            <div class="empty">Loading fund reference data...</div>
           </div>
-          <fieldset class="filters">
-            <legend>Screener parameters <span id="filters-scenario" class="muted"></span></legend>
-            <div class="filters-grid">
-              <label>DTE min <input type="number" name="dte_min" min="1" max="730" step="1" required></label>
-              <label>DTE max <input type="number" name="dte_max" min="1" max="730" step="1" required></label>
-              <label>|Delta| min <input type="number" name="delta_min" min="0" max="1" step="0.01" required></label>
-              <label>|Delta| max <input type="number" name="delta_max" min="0" max="1" step="0.01" required></label>
-              <label>Min open interest <input type="number" name="min_open_interest" min="0" step="1" required></label>
-              <label>Max spread % <input type="number" name="max_spread_pct" min="0" max="100" step="0.5" required></label>
-              <label>Min annualized yield % <input type="number" name="min_annualized_yield_pct" min="0" step="0.5" placeholder="off"></label>
-              <label>Target |delta| <input type="number" name="target_delta" min="0" max="1" step="0.01" placeholder="off"></label>
-              <label>Target strike (optional) <input type="number" name="target_strike" min="0" step="any" placeholder="off"></label>
-              <label>Strike comparison
-                <select name="strike_mode" disabled>
-                  <option value="exact">Exact (=)</option>
-                  <option value="lt">Less than (&lt;)</option>
-                  <option value="gt">Greater than (&gt;)</option>
-                </select>
-              </label>
-              <label>Max results <input type="number" name="max_results" min="1" max="50" step="1" required></label>
-            </div>
-            <div class="filters-actions">
-              <span id="filters-state" class="muted small"></span>
-              <button id="filters-reset" class="btn btn-ghost small" type="button">Reset to scenario defaults</button>
-            </div>
-          </fieldset>
-        </form>
-        <div id="scan-hint" class="muted small"></div>
-        <div id="results"></div>
-      </div>
-    </section>
+          <p class="muted small china-etfs-note">Reference premium (%) = (displayed completed close / latest published unit NAV − 1) × 100. Dates may differ; US valuation is not simultaneous. Not executable arbitrage. Fees are annual management + custody, not TER; retrieval dates are not fee effective dates. AUM is reported as dated, not realtime.</p>
+        </div>
+      </section>
+    </div>
+
+    <div class="tab-pane" id="tab-config">
+      <section class="card" id="card-config">
+        <div class="card-head">
+          <h2>Configuration</h2>
+          <span id="config-status" class="muted small"></span>
+        </div>
+        <div class="card-body" id="config-editor">
+          <div class="empty">Loading configuration...</div>
+        </div>
+      </section>
+    </div>
   </main>
 
   <footer class="muted small">

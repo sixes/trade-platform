@@ -42,7 +42,7 @@ NAV_URL = "https://api.fund.eastmoney.com/f10/lsjz"
 DAILY_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 FEEDER_DISCLOSURE_URL = "https://static.cninfo.com.cn/finalpage/2026-08-11/1225467509.PDF"
 PARTS = ("close", "nav", "profile")
-TTL = {"close": 300, "nav": 300, "profile": 86400}
+TTL = {"close": 600, "nav": 600, "profile": 86400, "iopv": 600}
 RETRY_SECONDS = 60
 REFRESH_DEADLINE = 60
 RESPONSE_LIMIT = 2_000_000
@@ -111,6 +111,7 @@ class ChinaEtfService:
         self._attempts = {}
         self._errors = {}
         self._task = None
+        self._iopv_cache: tuple = (0.0, {})  # (monotonic_time, {code: {iopv, prev_close, price, ...}})
 
     async def close(self):
         if self._task and not self._task.done():
@@ -128,14 +129,15 @@ class ChinaEtfService:
                     if (now - self._attempts.get(key, -math.inf) >= RETRY_SECONDS
                             and (cached is None or now - cached[0] >= TTL[part])):
                         due.append((fund, part))
-            if due:
-                self._task = asyncio.create_task(self._refresh(due))
+            iopv_due = now - self._iopv_cache[0] >= TTL["iopv"]
+            if due or iopv_due:
+                self._task = asyncio.create_task(self._refresh(due, iopv_due))
         refreshing = self._task is not None and not self._task.done()
         return {
             "items": self._rows(),
             "refreshing": refreshing,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "refresh_seconds": 3 if refreshing else 300,
+            "refresh_seconds": 3 if refreshing else 600,
         }
 
     async def _get(self, client, url, params=None):
@@ -148,7 +150,7 @@ class ChinaEtfService:
                     raise ValueError("Oversized public response")
             return bytes(body).decode("utf-8")
 
-    async def _refresh(self, due):
+    async def _refresh(self, due, iopv_due=False):
         market_tasks = [(fund[0], part) for fund, part in due if part in ("close", "nav")]
         concurrency = 2 if market_tasks else 4
         semaphore = asyncio.Semaphore(concurrency)
@@ -176,6 +178,8 @@ class ChinaEtfService:
                 work = [fetch(fund, part) for fund, part in due if part == "profile"]
                 if market_tasks:
                     work.append(self._refresh_market_data(market_tasks))
+                if iopv_due:
+                    work.append(self._refresh_iopv())
                 await asyncio.wait_for(asyncio.gather(*work), REFRESH_DEADLINE)
         except asyncio.TimeoutError:
             log.warning("China fund refresh reached its deadline")
@@ -321,6 +325,34 @@ class ChinaEtfService:
                 "aum_scope": "Source-reported net assets; share-class scope unspecified" if "LOF" in kind else "Fund net assets",
                 "source_url": url, "note": " ".join(notes)}
 
+    async def _refresh_iopv(self):
+        try:
+            import akshare as ak
+            df = await asyncio.get_event_loop().run_in_executor(None, ak.fund_etf_spot_em)
+            codes = {f[0] for f in FUNDS}
+            result = {}
+            for _, row in df.iterrows():
+                code = str(row.get("代码", ""))
+                if code not in codes:
+                    continue
+                iopv = number(row.get("IOPV实时估值"))
+                prev_close = number(row.get("昨收"))
+                price = number(row.get("最新价"))
+                result[code] = {
+                    "iopv": iopv,
+                    "prev_close": prev_close,
+                    "price": price,
+                    "retrieved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+            self._iopv_cache = (time.monotonic(), result)
+        except Exception as exc:
+            log.warning("IOPV refresh unavailable: %s", exc)
+            self._iopv_cache = (time.monotonic(), self._iopv_cache[1])
+
+    def _iopv(self, code):
+        _, data = self._iopv_cache
+        return data.get(code, {})
+
     def _part(self, code, part):
         cached = self._cache.get((code, part))
         value = dict(cached[1]) if cached else {}
@@ -347,6 +379,9 @@ class ChinaEtfService:
         rows = []
         for code, exchange, benchmark, fallback_name, kind in sorted(FUNDS, key=lambda f: (f[2], f[0])):
             close, nav, profile = (self._part(code, part) for part in PARTS)
+            iopv_data = self._iopv(code)
+            iopv_value = iopv_data.get("iopv")
+            prev_close = iopv_data.get("prev_close")
             premium = None
             premium_note = "Reference only; price and US-asset valuation are not simultaneous."
             if close["value"] is not None and nav["value"] is not None:
@@ -355,20 +390,20 @@ class ChinaEtfService:
                     premium = result
                 if close["date"] != nav["date"]:
                     premium_note = f"Dates differ: close {close['date']} / NAV {nav['date']}. Reference only, not live fair value."
-                    first, last = sorted((close["date"], nav["date"]))
-                    if any(first < event <= last for event in nav.get("share_events", [])):
-                        premium, premium_note = None, "Unavailable: a reported share adjustment falls between the price and NAV dates."
-                    elif (not nav.get("history_start") or not nav.get("history_end")
-                          or first < nav["history_start"] or last > nav["history_end"]):
-                        premium, premium_note = None, "Unavailable: the price/NAV comparison interval is outside validated action-history coverage."
-                    elif any(first < event <= last for event in nav.get("uncertain_events", [])):
-                        premium, premium_note = None, "Unavailable: unresolved fund action metadata falls between the price and NAV dates."
             else:
                 premium_note = "Unavailable until both a completed close and unit NAV are available."
+            close_iopv = None
+            if close["value"] is not None and iopv_value is not None and iopv_value > 0:
+                ratio = close["value"] / iopv_value
+                if math.isfinite(ratio):
+                    close_iopv = ratio
             warnings = [f"{part.upper() if part == 'nav' else part.capitalize()}: {value['status']}"
                         for part, value in (("close", close), ("nav", nav), ("profile", profile)) if value["status"] != "ok"]
             rows.append({"code": code, "exchange": exchange, "index": benchmark, "kind": kind,
                          "name": profile.get("name", fallback_name), "fund_url": PROFILE_URL.format(code=code),
                          "close": close, "nav": nav, "profile": profile, "premium_pct": premium,
-                         "premium_note": premium_note, "warnings": warnings})
+                         "premium_note": premium_note, "warnings": warnings,
+                         "iopv": iopv_value, "prev_close": prev_close,
+                         "close_iopv": close_iopv,
+                         "iopv_retrieved_at": iopv_data.get("retrieved_at")})
         return rows

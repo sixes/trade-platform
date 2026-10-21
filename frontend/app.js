@@ -11,6 +11,7 @@
     lastJobId: null,
     waitDeadline: null,
     pollTimer: null,
+    activeTab: "markets",
   };
 
   const FILTER_FIELDS = ["dte_min", "dte_max", "delta_min", "delta_max", "min_open_interest", "max_spread_pct", "min_annualized_yield_pct", "target_delta", "target_strike", "strike_mode", "max_results"];
@@ -23,6 +24,66 @@
   const signed = (v, d = 2) => (v == null ? "-" : (v > 0 ? "+" : "") + Number(v).toFixed(d));
   const badge = (level, text) => `<span class="badge badge-${esc(String(level || "muted").replace(/\s+/g, "_"))}">${esc(text || level || "-")}</span>`;
   const ticker = (symbol) => String(symbol || "").replace(/\.US$/i, "");
+
+  // ------------------------------------------------------------------ tabs
+  const TAB_STORAGE_KEY = "trade-plat.activeTab";
+  const TABS = ["markets", "china", "config"];
+  const chinaTabLoaded = { futures: false, etfs: false };
+  const configTabLoaded = { loaded: false };
+
+  function initTabs() {
+    const bar = $("#tab-bar");
+    if (!bar) return;
+    let active = "markets";
+    try { const saved = localStorage.getItem(TAB_STORAGE_KEY); if (TABS.includes(saved)) active = saved; } catch (e) {}
+    bar.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+    });
+    switchTab(active, true);
+  }
+
+  function switchTab(tabId, initial) {
+    if (!TABS.includes(tabId)) return;
+    state.activeTab = tabId;
+    document.querySelectorAll(".tab-pane").forEach((pane) => pane.classList.toggle("active", pane.id === `tab-${tabId}`));
+    document.querySelectorAll(".tab-btn").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tabId));
+    try { localStorage.setItem(TAB_STORAGE_KEY, tabId); } catch (e) {}
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const pane = document.getElementById(`tab-${tabId}`);
+      if (pane) Object.values(state.charts).forEach((ch) => { if (pane.contains(ch.canvas)) ch.resize(); });
+    }));
+    updateNavForTab(tabId);
+    if (tabId === "china") {
+      if (!chinaTabLoaded.etfs) { chinaTabLoaded.etfs = true; loadChinaEtfs(); }
+      if (!chinaTabLoaded.futures) { chinaTabLoaded.futures = true; loadChinaFutures(); }
+    }
+    if (tabId === "config" && !configTabLoaded.loaded) {
+      configTabLoaded.loaded = true;
+      loadConfigEditor();
+    }
+  }
+
+  function updateNavForTab(tabId) {
+    const nav = $("#section-nav");
+    nav.innerHTML = "";
+    const pane = document.getElementById(`tab-${tabId}`);
+    if (!pane) return;
+    pane.querySelectorAll(".card[id]").forEach((card) => {
+      if (card.classList.contains("hidden")) return;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = NAV_LABELS[card.id] || (card.querySelector("h2") || {}).textContent || card.id;
+      btn.addEventListener("click", () => {
+        if (card.classList.contains("collapsed")) {
+          setCollapsed(card, false);
+          const all = foldedState(); all[card.id] = false; saveFolded(all); updateFoldAllLabel();
+        }
+        const header = document.querySelector(".topbar").getBoundingClientRect().height;
+        window.scrollTo({ top: card.getBoundingClientRect().top + window.scrollY - header - 10, behavior: "smooth" });
+      });
+      nav.appendChild(btn);
+    });
+  }
 
   async function api(path, options) {
     const res = await fetch(path, Object.assign({ headers: { "content-type": "application/json" } }, options || {}));
@@ -462,13 +523,20 @@
           ctx.restore();
         },
       };
+      const yScale = {title: {display: true, text: priceChange ? "Price change (%)" : "Rate (%)", color: "#8b98a8"}, ticks: {color: "#8b98a8", maxTicksLimit: 6, callback: (value) => `${num(value, 2)}%`}, grid: {color: "#263241"}};
+      if (priceChange) {
+        const allVals = datasets.flatMap((ds) => ds.data.filter(Number.isFinite));
+        const absMax = Math.max(1, ...allVals.map(Math.abs)) * 1.05;
+        yScale.min = -absMax;
+        yScale.max = absMax;
+      }
       state.charts[chartKey] = new Chart(card.querySelector("canvas"), {
         type: "line", plugins: [band, crosshairPlugin], data: {labels: dates, datasets},
         options: {
           animation: false, responsive: true, maintainAspectRatio: false,
           interaction: {mode: "index", intersect: false},
           plugins: {
-            legend: {display: true, position: "bottom", labels: {color: "#e6edf3", boxWidth: 20, boxHeight: 2, font: {size: 11}}},
+            legend: {display: true, position: "bottom", labels: {color: "#e6edf3", boxWidth: 20, boxHeight: 0, font: {size: 11}}},
             crosshair: {format: (value) => `${num(value, 2)}%`},
             tooltip: {callbacks: {
               title: (items) => items[0]?.label || "",
@@ -481,7 +549,7 @@
           },
           scales: {
             x: {ticks: {color: "#8b98a8", maxTicksLimit: (context) => context.chart.width < 400 ? 2 : 5, maxRotation: 0, font: {size: 10}}, grid: {color: "#263241"}},
-            y: {title: {display: true, text: priceChange ? "Price change (%)" : "Rate (%)", color: "#8b98a8"}, ticks: {color: "#8b98a8", maxTicksLimit: 6, callback: (value) => `${num(value, 2)}%`}, grid: {color: "#263241"}},
+            y: yScale,
           },
         },
       });
@@ -678,7 +746,11 @@
       },
       scales: {
         x: xScale,
-        y: { ticks: { color: "#8b98a8", maxTicksLimit: 5, font: { size: 10 }, ...(percent ? { callback: (v) => `${signed(v, 2)}%` } : unit === "bp" ? { callback: (v) => fmtPrecise(v, unit) } : {}) }, grid: { color: "#1f2a37" } },
+        y: (() => {
+          const ys = { ticks: { color: "#8b98a8", maxTicksLimit: 5, font: { size: 10 }, ...(percent ? { callback: (v) => `${signed(v, 2)}%` } : unit === "bp" ? { callback: (v) => fmtPrecise(v, unit) } : {}) }, grid: { color: "#1f2a37" } };
+          if (percent) { const abs = Math.max(1, ...values.map((v) => Math.abs(typeof v === "object" ? v.y : v)).filter(Number.isFinite)) * 1.05; ys.min = -abs; ys.max = abs; }
+          return ys;
+        })(),
       },
     };
     const existing = state.charts[key];
@@ -1306,7 +1378,7 @@
     setSummary("watchlist-card", items.filter((it) => it.iv_rank && it.iv_rank.value != null).map((it) => `${it.ticker} ${num(it.iv_rank.value, 0)}`).join(" · ") || `${items.length} tickers`);
   }
 
-  const chinaEtfsState = { data: null, inflight: false, timer: null, refreshSeconds: 300, nextRefreshAt: 0, summary: "Loading fund reference data..." };
+  const chinaEtfsState = { data: null, inflight: false, timer: null, refreshSeconds: 600, nextRefreshAt: 0, summary: "Loading fund reference data..." };
   const chinaEtfNumber = (value, decimals, suffix = "") => Number.isFinite(value) ? num(value, decimals, suffix) : "-";
   const chinaEtfDetail = (text, warning = false) => text ? `<div class="small ${warning ? "china-etfs-warning" : "muted"}">${esc(text)}</div>` : "";
 
@@ -1336,33 +1408,40 @@
     const warnings = [...new Set(item.warnings || [])].filter((note) => !feeder || note !== feederNote);
     const dateMismatch = close.date && nav.date && close.date !== nav.date;
     const premiumKnown = Number.isFinite(item.premium_pct);
+    const iopvKnown = Number.isFinite(item.iopv);
+    const ratioKnown = Number.isFinite(item.close_iopv);
     return `<tr>
-      <td class="left">
+      <td class="left" data-sort="${esc(item.name || "")}">
         <b lang="zh-CN">${chinaEtfLink(item.fund_url, item.name || "-")}</b>
         ${chinaEtfDetail(`${item.code || "-"} · ${item.exchange || "-"} · ${item.kind || "-"}`)}
         ${warnings.map((note) => chinaEtfDetail(note, true)).join("")}
       </td>
-      <td><b>${chinaEtfNumber(close.value, 3)}</b>
+      <td data-sort="${close.value ?? ""}"><b>${chinaEtfNumber(close.value, 3)}</b>
         ${chinaEtfDetail(`Close date ${close.date || "-"}`)}
         ${chinaEtfDetails(close, !Number.isFinite(close.value))}
       </td>
-      <td><b>${chinaEtfNumber(nav.value, 4)}</b>
+      <td data-sort="${nav.value ?? ""}"><b>${chinaEtfNumber(nav.value, 4)}</b>
         ${chinaEtfDetail(`Unit NAV date ${nav.date || "-"}`)}
         ${chinaEtfDetails(nav, !Number.isFinite(nav.value))}
       </td>
-      <td><b class="${premiumKnown && item.premium_pct > 0 ? "china-etfs-premium" : ""}">${premiumKnown ? `${signed(item.premium_pct, 2)}%` : "-"}</b>
+      <td data-sort="${item.premium_pct ?? ""}"><b class="${premiumKnown && item.premium_pct > 0 ? "china-etfs-premium" : ""}">${premiumKnown ? `${signed(item.premium_pct, 2)}%` : "-"}</b>
         ${dateMismatch ? chinaEtfDetail(`Dates differ: close ${close.date}; NAV ${nav.date}.`, true) : ""}
-        ${premiumKnown && (close.status === "stale" || nav.status === "stale") ? chinaEtfDetail("Uses stale reference data", true) : ""}
-        ${chinaEtfDetail(dateMismatch && premiumKnown ? "Reference only, not live fair value." : item.premium_note || (premiumKnown ? "" : "Reference unavailable"))}
+        ${chinaEtfDetail(item.premium_note || "")}
       </td>
-      <td><b>${feesKnown ? chinaEtfNumber(management + custody, 2, "%") : "-"}</b>
+      <td data-sort="${item.iopv ?? ""}"><b>${iopvKnown ? chinaEtfNumber(item.iopv, 4) : "-"}</b>
+        ${item.iopv_retrieved_at ? chinaEtfDetail(`As of ${item.iopv_retrieved_at}`) : ""}
+      </td>
+      <td data-sort="${item.close_iopv ?? ""}"><b class="${ratioKnown && item.close_iopv > 1 ? "china-etfs-premium" : ""}">${ratioKnown ? chinaEtfNumber(item.close_iopv, 4) : "-"}</b>
+        ${ratioKnown ? chinaEtfDetail(`${item.close_iopv > 1 ? "Premium" : "Discount"} ${chinaEtfNumber(Math.abs((item.close_iopv - 1) * 100), 2)}%`) : ""}
+      </td>
+      <td data-sort="${feesKnown ? management + custody : ""}"><b>${feesKnown ? chinaEtfNumber(management + custody, 2, "%") : "-"}</b>
         ${chinaEtfDetail(`Management ${chinaEtfNumber(management, 2, "%")} + custody ${chinaEtfNumber(custody, 2, "%")}`)}
         ${feeder ? chinaEtfDetail(feederNote, true) : ""}
         ${chinaEtfDetail(profile.fee_note)}
         ${profile.fee_source_url ? `<div class="small">${chinaEtfLink(profile.fee_source_url, "Fee-base disclosure")}</div>` : ""}
         ${chinaEtfDetails(profile, !feesKnown, "Profile source")}
       </td>
-      <td><b>${Number.isFinite(profile.aum_cny) ? chinaEtfNumber(profile.aum_cny / 1e9, 3) : "-"}</b>
+      <td data-sort="${Number.isFinite(profile.aum_cny) ? profile.aum_cny : ""}"><b>${Number.isFinite(profile.aum_cny) ? chinaEtfNumber(profile.aum_cny / 1e9, 3) : "-"}</b>
         ${chinaEtfDetail(`Reported ${profile.aum_date || "-"}`)}
         ${chinaEtfDetail(`Scope: ${profile.aum_scope || "-"}`)}
         ${chinaEtfDetails(profile, !Number.isFinite(profile.aum_cny), "Profile source")}
@@ -1380,12 +1459,13 @@
     const items = data.items || [];
     const rows = ["Nasdaq-100", "S&P 500"].map((index) => {
       const group = items.filter((item) => item.index === index);
-      return group.length ? `<tbody><tr class="china-etfs-group"><th colspan="6" scope="rowgroup">${esc(index)}</th></tr>${group.map(chinaEtfRow).join("")}</tbody>` : "";
+      return group.length ? `<tbody><tr class="china-etfs-group"><th colspan="8" scope="rowgroup">${esc(index)}</th></tr>${group.map(chinaEtfRow).join("")}</tbody>` : "";
     }).join("");
     $("#china-etfs-table").innerHTML = `<table aria-label="Mainland China US-index ETFs and LOFs">
-      <thead><tr><th scope="col">Fund name</th><th scope="col">Previous close (CNY)</th><th scope="col">NAV (CNY)</th><th scope="col">Premium (reference)</th><th scope="col">Fees (annual)</th><th scope="col">AUM (CNY bn)</th></tr></thead>
-      ${rows || `<tbody><tr><td colspan="6" class="left empty">${data.refreshing ? "Loading fund reference data; backend refreshing..." : "Fund reference data unavailable."}</td></tr></tbody>`}
+      <thead><tr><th scope="col" class="sortable" data-col="0">Fund name</th><th scope="col" class="sortable" data-col="1">Close (CNY)</th><th scope="col" class="sortable" data-col="2">NAV (CNY)</th><th scope="col" class="sortable" data-col="3">Close/NAV</th><th scope="col" class="sortable" data-col="4">IOPV</th><th scope="col" class="sortable" data-col="5">Close/IOPV</th><th scope="col" class="sortable" data-col="6">Fees (annual)</th><th scope="col" class="sortable" data-col="7">AUM (CNY bn)</th></tr></thead>
+      ${rows || `<tbody><tr><td colspan="8" class="left empty">${data.refreshing ? "Loading fund reference data; backend refreshing..." : "Fund reference data unavailable."}</td></tr></tbody>`}
     </table>`;
+    initChinaEtfSort();
     const partial = items.some((item) => [item.close.value, item.nav.value, item.premium_pct, item.profile.management_fee_pct, item.profile.custody_fee_pct, item.profile.aum_cny].some((value) => !Number.isFinite(value)) || [item.close, item.nav, item.profile].some((part) => part.status === "unavailable"));
     const stale = items.filter((item) => [item.close, item.nav, item.profile].some((part) => part.status === "stale")).length;
     const available = items.some((item) => [item.close.value, item.nav.value, item.profile.management_fee_pct, item.profile.custody_fee_pct, item.profile.aum_cny].some(Number.isFinite));
@@ -1393,9 +1473,55 @@
       `${items.length} funds`,
       !available ? "Data unavailable" : partial ? "Partial data; missing fields shown as -" : "Reference data loaded",
       stale ? `${stale} funds with stale fields` : "",
-      data.refreshing ? "Backend refreshing; checking every 3s while visible" : "Checks every 300s while visible; Refresh uses server cache",
+      data.refreshing ? "Backend refreshing; checking every 3s while visible" : "Refreshes every 10 min while visible; Refresh uses server cache",
       `Snapshot ${data.generated_at || "-"}`,
     ].filter(Boolean).join(" · "));
+  }
+
+  const chinaEtfSortState = { col: -1, asc: true };
+
+  function initChinaEtfSort() {
+    const table = $("#china-etfs-table table");
+    if (!table) return;
+    table.querySelectorAll("th.sortable").forEach((th) => {
+      th.addEventListener("click", () => {
+        const col = parseInt(th.dataset.col, 10);
+        if (chinaEtfSortState.col === col) chinaEtfSortState.asc = !chinaEtfSortState.asc;
+        else { chinaEtfSortState.col = col; chinaEtfSortState.asc = true; }
+        applyChinaEtfSort();
+      });
+    });
+    if (chinaEtfSortState.col >= 0) applyChinaEtfSort();
+  }
+
+  function applyChinaEtfSort() {
+    const table = $("#china-etfs-table table");
+    if (!table || chinaEtfSortState.col < 0) return;
+    sortChinaEtfTable(table, chinaEtfSortState.col, chinaEtfSortState.asc);
+    table.querySelectorAll("th.sortable").forEach((h) => h.classList.remove("sort-asc", "sort-desc"));
+    const th = table.querySelector(`th[data-col="${chinaEtfSortState.col}"]`);
+    if (th) th.classList.add(chinaEtfSortState.asc ? "sort-asc" : "sort-desc");
+  }
+
+  function sortChinaEtfTable(table, col, asc) {
+    const bodies = table.querySelectorAll("tbody");
+    bodies.forEach((tbody) => {
+      const rows = [...tbody.querySelectorAll("tr:not(.china-etfs-group)")];
+      if (!rows.length) return;
+      rows.sort((a, b) => {
+        const av = a.children[col]?.dataset.sort ?? "";
+        const bv = b.children[col]?.dataset.sort ?? "";
+        const an = parseFloat(av), bn = parseFloat(bv);
+        const aNum = av !== "" && !isNaN(an), bNum = bv !== "" && !isNaN(bn);
+        if (!aNum && !bNum) return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+        if (!aNum) return 1;
+        if (!bNum) return -1;
+        return asc ? an - bn : bn - an;
+      });
+      const groupRow = tbody.querySelector("tr.china-etfs-group");
+      if (groupRow) rows.forEach((r) => tbody.appendChild(r));
+      else rows.forEach((r) => tbody.appendChild(r));
+    });
   }
 
   function scheduleChinaEtfsRefresh() {
@@ -1416,11 +1542,11 @@
       const data = await api("/api/china-etfs");
       renderChinaEtfs(data);
       chinaEtfsState.data = data;
-      chinaEtfsState.refreshSeconds = data.refreshing ? 3 : 300;
+      chinaEtfsState.refreshSeconds = data.refreshing ? 3 : 600;
     } catch (err) {
       if (!chinaEtfsState.data) $("#china-etfs-table").innerHTML = `<div class="empty">Fund reference data unavailable. Use Refresh to retry.</div>`;
       setChinaEtfsStatus(`Update unavailable; ${chinaEtfsState.data ? `showing last loaded snapshot ${chinaEtfsState.data.generated_at || "-"} (may be stale)` : "no reference data loaded"}. ${err.message}`);
-      chinaEtfsState.refreshSeconds = 300;
+      chinaEtfsState.refreshSeconds = 600;
     } finally {
       chinaEtfsState.inflight = false;
       $("#china-etfs-refresh").disabled = false;
@@ -1432,6 +1558,156 @@
 
   $("#china-etfs-refresh").addEventListener("click", loadChinaEtfs);
   document.addEventListener("visibilitychange", scheduleChinaEtfsRefresh);
+
+  // ------------------------------------------------------------------ China futures vs index overlay charts
+  const chinaFuturesState = { data: null, inflight: false, timer: null, range: null, storageKey: "trade-plat.chinaFuturesRange" };
+  const CHINA_FUTURES_PAIRS = ["IF", "IH", "IC", "IM"];
+  const CHINA_FUTURES_COLORS = { futures: "#38bdf8", index: "#f5a524" };
+
+  function chinaFuturesRange() {
+    if (!chinaFuturesState.range) {
+      try { chinaFuturesState.range = localStorage.getItem(chinaFuturesState.storageKey) || "1y"; } catch (e) { chinaFuturesState.range = "1y"; }
+    }
+    return chinaFuturesState.range;
+  }
+
+  async function loadChinaFutures() {
+    if (chinaFuturesState.inflight) return;
+    chinaFuturesState.inflight = true;
+    const range = chinaFuturesRange();
+    document.querySelectorAll("#china-futures-ranges button").forEach((b) => b.classList.toggle("active", b.dataset.range === range));
+    try {
+      const data = await api(`/api/china-futures?range=${encodeURIComponent(range)}`);
+      chinaFuturesState.data = data;
+      renderChinaFutures(data);
+      scheduleChinaFuturesRefresh(1800000);
+    } catch (err) {
+      $("#china-futures-status").textContent = `Update failed: ${err.message}`;
+      scheduleChinaFuturesRefresh(60000);
+    } finally {
+      chinaFuturesState.inflight = false;
+    }
+  }
+
+  function scheduleChinaFuturesRefresh(ms) {
+    clearTimeout(chinaFuturesState.timer);
+    chinaFuturesState.timer = setTimeout(() => {
+      if (document.visibilityState === "visible" && state.activeTab === "china" && !$("#card-china-futures").classList.contains("collapsed")) loadChinaFutures();
+      else scheduleChinaFuturesRefresh(30000);
+    }, ms);
+  }
+
+  document.querySelectorAll("#china-futures-ranges button").forEach((btn) => btn.addEventListener("click", () => {
+    chinaFuturesState.range = btn.dataset.range;
+    try { localStorage.setItem(chinaFuturesState.storageKey, chinaFuturesState.range); } catch (e) {}
+    loadChinaFutures();
+  }));
+
+  const basisFillPlugin = {
+    id: "basisFill",
+    beforeDatasetsDraw(chart) {
+      const ds = chart.data.datasets;
+      if (ds.length < 2 || !chart.isDatasetVisible(0) || !chart.isDatasetVisible(1)) return;
+      const futuresData = ds[0].data, indexData = ds[1].data;
+      const { ctx, scales: { x, y }, chartArea: area } = chart;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(area.left, area.top, area.width, area.height); ctx.clip();
+      for (let i = 0; i < futuresData.length - 1; i++) {
+        const fv = futuresData[i], iv = indexData[i], fvn = futuresData[i + 1], ivn = indexData[i + 1];
+        if (![fv, iv, fvn, ivn].every(Number.isFinite)) continue;
+        ctx.fillStyle = fv >= iv ? "rgba(63,185,80,0.12)" : "rgba(248,81,73,0.12)";
+        const left = x.getPixelForValue(i), right = x.getPixelForValue(i + 1);
+        const top = Math.min(y.getPixelForValue(fv), y.getPixelForValue(iv));
+        const bot = Math.max(y.getPixelForValue(fv), y.getPixelForValue(iv));
+        ctx.fillRect(left, top, right - left, Math.max(bot - top, 1));
+      }
+      ctx.restore();
+    },
+  };
+
+  function renderChinaFutures(data) {
+    const grid = $("#china-futures-grid");
+    const pairs = data.pairs || {};
+    const keys = CHINA_FUTURES_PAIRS.filter((k) => pairs[k]);
+    if (!keys.length) {
+      grid.innerHTML = `<div class="empty">No futures data available.</div>`;
+      $("#china-futures-status").textContent = "Data unavailable";
+      return;
+    }
+    if (grid.dataset.built !== keys.join(",")) {
+      grid.innerHTML = keys.map((k) => `
+        <div class="macro-card china-futures-card" data-pair="${esc(k)}">
+          <div class="mini-head"><h3>${esc(k)} vs ${esc(pairs[k].index_name || k)}</h3></div>
+          <div class="china-futures-metrics" id="cf-metrics-${esc(k)}"></div>
+          <div class="macro-chart"><canvas id="cf-chart-${esc(k)}"></canvas></div>
+        </div>`).join("");
+      grid.dataset.built = keys.join(",");
+      Object.keys(state.charts).filter((c) => c.startsWith("cf:")).forEach((c) => { state.charts[c].destroy(); delete state.charts[c]; });
+    }
+    keys.forEach((k) => {
+      const pair = pairs[k];
+      const chartKey = `cf:${k}`;
+      const metricsEl = $(`#cf-metrics-${k}`);
+      if (pair.error) {
+        clearSeriesChart(chartKey);
+        metricsEl.innerHTML = `<span class="sub">unavailable: ${esc(pair.error)}</span>`;
+        return;
+      }
+      const m = pair.metrics || {};
+      const basisCls = m.basis_last >= 0 ? "basis-positive" : "basis-negative";
+      metricsEl.innerHTML = `
+        <span class="value">${esc(pair.futures_name)}</span>
+        <span class="sub">${num(m.futures_last, 2)}</span>
+        <span class="sub">vs</span>
+        <span class="value">${esc(pair.index_name)}</span>
+        <span class="sub">${num(m.index_last, 2)}</span>
+        <span class="sub">basis</span>
+        <span class="value ${basisCls}">${signed(m.basis_last, 2)} (${signed(m.basis_pct, 2)}%)</span>
+        <span class="sub">${m.date || ""} · ${m.points || 0} pts</span>`;
+      if (typeof Chart === "undefined" || !pair.futures || !pair.futures.length) return;
+      const labels = pair.futures.map((p) => p.t);
+      const datasets = [
+        { label: pair.futures_name, data: pair.futures.map((p) => p.v), borderColor: CHINA_FUTURES_COLORS.futures, backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, tension: 0, fill: false },
+        { label: pair.index_name, data: pair.index.map((p) => p.v), borderColor: CHINA_FUTURES_COLORS.index, backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, tension: 0, fill: false },
+      ];
+      const existing = state.charts[chartKey];
+      if (existing) {
+        existing.data.labels = labels;
+        existing.data.datasets.forEach((ds, i) => { if (datasets[i]) { ds.data = datasets[i].data; ds.label = datasets[i].label; } });
+        existing.update("none");
+        return;
+      }
+      state.charts[chartKey] = new Chart($(`#cf-chart-${k}`), {
+        type: "line", plugins: [basisFillPlugin, crosshairPlugin], data: { labels, datasets },
+        options: {
+          animation: false, responsive: true, maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          plugins: {
+            legend: { display: true, position: "bottom", labels: { color: "#e6edf3", boxWidth: 20, boxHeight: 0, font: { size: 11 } } },
+            crosshair: { format: (v) => num(v, 2) },
+            tooltip: { callbacks: {
+              title: (items) => items[0]?.label || "",
+              label: (item) => `${item.dataset.label}: ${num(item.parsed.y, 2)}`,
+              afterBody: (items) => {
+                const idx = items[0]?.dataIndex;
+                if (idx == null || !pair.basis[idx]) return [];
+                return [`Basis: ${signed(pair.basis[idx].v, 2)} (${signed(pair.basis_pct[idx].v, 2)}%)`];
+              },
+            }},
+          },
+          scales: {
+            x: { ticks: { color: "#8b98a8", maxTicksLimit: 6, maxRotation: 0, font: { size: 10 } }, grid: { color: "#1f2a37" } },
+            y: { ticks: { color: "#8b98a8", maxTicksLimit: 6 }, grid: { color: "#1f2a37" } },
+          },
+        },
+      });
+    });
+    const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const ok = keys.filter((k) => !pairs[k].error).length;
+    $("#china-futures-status").textContent = `${ok}/${keys.length} pairs · ${data.range.toUpperCase()} · refreshed ${stamp} · daily data`;
+    setSummary("card-china-futures", keys.filter((k) => pairs[k].metrics).map((k) => `${k} basis ${signed(pairs[k].metrics.basis_pct, 2)}%`).join(" · "));
+    requestAnimationFrame(() => keys.forEach((k) => { const ch = state.charts[`cf:${k}`]; if (ch) ch.resize(); }));
+  }
 
   // ------------------------------------------------------------------ fold / unfold
   const FOLD_KEY = "trade-plat.folded";
@@ -1631,32 +1907,166 @@
     });
   }
 
+  // ------------------------------------------------------------------ config editor
+  const CONFIG_DESCRIPTIONS = {
+    "server.host": "IP address to bind to (requires restart)",
+    "server.port": "TCP port number (requires restart)",
+    "logging.level": "Python logging level (requires restart)",
+    "logging.file": "Log file path (requires restart)",
+    "logging.max_bytes": "Max log file size before rotation",
+    "logging.backup_count": "Number of rotated log files to keep",
+    "data.dir": "Data directory path",
+    "data.db_file": "SQLite database file path",
+    "data.index_cache_ttl_minutes": "Minutes before cached daily histories are refreshed",
+    "data.history_days": "Maximum daily history points to keep (trading days)",
+    "longbridge.requests_per_second": "Longbridge API rate limit (calls/sec)",
+    "longbridge.burst": "Longbridge API burst allowance",
+    "longbridge.max_retries": "Max retry attempts for rate-limited calls",
+    "longbridge.base_backoff_seconds": "Initial backoff for rate-limited retries",
+    "longbridge.max_backoff_seconds": "Max backoff between retries",
+    "longbridge.option_contracts_per_minute": "Option contracts quoted per minute budget",
+    "longbridge.option_quote_batch_size": "Symbols per option quote API call",
+    "longbridge.depth_top_n": "Candidates per underlying enriched with bid/ask",
+    "longbridge.max_expiries_per_symbol": "Expiries per underlying per scan",
+    "longbridge.max_strikes_per_expiry": "Strikes quoted per expiry after thinning",
+    "thresholds.vix.low": "VIX below this = LOW regime",
+    "thresholds.vix.medium": "VIX below this = MEDIUM regime",
+    "thresholds.vix.high": "VIX below this = HIGH regime (above = VERY HIGH)",
+    "thresholds.iv_rank.low": "IV rank below this = LOW",
+    "thresholds.iv_rank.medium": "IV rank below this = MEDIUM",
+    "thresholds.iv_rank.high": "IV rank below this = HIGH (above = EXTREME)",
+    "thresholds.iv_rank.lookback_days": "IV rank lookback period (trading days)",
+    "thresholds.skew.low": "SKEW below this = LOW",
+    "thresholds.skew.normal": "SKEW below this = NORMAL",
+    "thresholds.skew.high": "SKEW below this = HIGH (above = EXTREME)",
+    "thresholds.skew.lookback_days": "SKEW percentile lookback (trading days)",
+    "analytics.risk_free_rate": "Risk-free rate for Black-Scholes pricing",
+    "analytics.dividend_yield": "Dividend yield for Black-Scholes pricing",
+    "analytics.reference_dte": "Reference DTE for ATM IV and chain skew metrics",
+    "analytics.skew_delta": "Delta for chain put skew ratio",
+    "macro.live_ttl_seconds": "Seconds between live feed refreshes",
+    "macro.default_range": "Default chart range for live sections",
+    "macro.max_symbols_per_section": "Max user-added tickers per section",
+    "kalshi.enabled": "Enable Kalshi prediction market charts",
+    "kalshi.refresh_seconds": "Seconds between Kalshi data refreshes",
+    "iv_snapshot.enabled": "Enable daily automated IV snapshots",
+    "iv_snapshot.daily_at_et": "Time (ET) for daily IV snapshot",
+  };
+  const RESTART_SECTIONS = new Set(["server", "logging"]);
+
+  async function loadConfigEditor() {
+    try {
+      const data = await api("/api/config/raw");
+      renderConfigEditor(data);
+    } catch (err) {
+      $("#config-editor").innerHTML = `<div class="error-text">Failed to load configuration: ${esc(err.message)}</div>`;
+    }
+  }
+
+  function renderConfigEditor(data) {
+    const container = $("#config-editor");
+    container.innerHTML = "";
+    Object.keys(data).forEach((sectionKey) => {
+      const section = data[sectionKey];
+      const group = document.createElement("div");
+      group.className = "config-section";
+      const isRestart = RESTART_SECTIONS.has(sectionKey);
+      const head = document.createElement("div");
+      head.className = "config-section-head";
+      head.innerHTML = `<h3>${esc(sectionKey)}</h3><span class="muted small">${isRestart ? "Requires restart" : "Live-reloadable"}</span>`;
+      head.addEventListener("click", () => {
+        const body = head.nextElementSibling;
+        body.classList.toggle("collapsed");
+        head.classList.toggle("collapsed");
+      });
+      group.appendChild(head);
+      const body = document.createElement("div");
+      body.className = "config-section-body";
+      renderConfigFields(body, section, sectionKey);
+      group.appendChild(body);
+      container.appendChild(group);
+    });
+    const saveRow = document.createElement("div");
+    saveRow.className = "config-save-row";
+    saveRow.innerHTML = `<button id="config-save" class="btn btn-primary">Save all changes</button><span id="config-save-status" class="muted small"></span><p class="muted small">Saving reformats config.yaml and removes YAML comments.</p>`;
+    container.appendChild(saveRow);
+    $("#config-save").addEventListener("click", saveConfig);
+  }
+
+  function renderConfigFields(container, obj, prefix) {
+    if (obj == null || typeof obj !== "object" || Array.isArray(obj)) {
+      const row = createConfigInput(prefix, obj);
+      container.appendChild(row);
+      return;
+    }
+    Object.entries(obj).forEach(([key, value]) => {
+      const path = `${prefix}.${key}`;
+      const desc = CONFIG_DESCRIPTIONS[path] || "";
+      if (value != null && typeof value === "object" && !Array.isArray(value)) {
+        const fieldset = document.createElement("fieldset");
+        fieldset.className = "config-group";
+        fieldset.innerHTML = `<legend>${esc(key)}</legend>`;
+        renderConfigFields(fieldset, value, path);
+        container.appendChild(fieldset);
+      } else {
+        container.appendChild(createConfigInput(path, value, key, desc));
+      }
+    });
+  }
+
+  function createConfigInput(path, value, label, desc) {
+    const row = document.createElement("div");
+    row.className = "config-field";
+    const inputId = `cfg-${path.replace(/\./g, "-")}`;
+    const displayLabel = label || path.split(".").pop();
+    let inputHtml;
+    if (typeof value === "boolean") {
+      inputHtml = `<input type="checkbox" id="${esc(inputId)}" data-path="${esc(path)}" data-type="boolean" ${value ? "checked" : ""}>`;
+    } else if (Array.isArray(value)) {
+      inputHtml = `<input type="text" id="${esc(inputId)}" data-path="${esc(path)}" data-type="json" value="${esc(JSON.stringify(value))}">`;
+    } else if (typeof value === "number") {
+      inputHtml = `<input type="number" id="${esc(inputId)}" data-path="${esc(path)}" data-type="number" value="${esc(String(value))}" step="any">`;
+    } else {
+      inputHtml = `<input type="text" id="${esc(inputId)}" data-path="${esc(path)}" data-type="string" value="${esc(value == null ? "" : String(value))}">`;
+    }
+    row.innerHTML = `<label for="${esc(inputId)}"><span class="config-label">${esc(displayLabel)}</span>${desc ? `<span class="config-desc muted small">${esc(desc)}</span>` : ""}</label>${inputHtml}`;
+    return row;
+  }
+
+  async function saveConfig() {
+    const inputs = document.querySelectorAll("#config-editor [data-path]");
+    const updates = [];
+    inputs.forEach((input) => {
+      const path = input.dataset.path;
+      const type = input.dataset.type;
+      let value;
+      if (type === "boolean") value = input.checked;
+      else if (type === "number") value = input.value === "" ? null : Number(input.value);
+      else if (type === "json") { try { value = JSON.parse(input.value); } catch (e) { value = input.value; } }
+      else value = input.value;
+      updates.push({ path, value });
+    });
+    const statusEl = $("#config-save-status");
+    try {
+      const result = await api("/api/config", { method: "POST", body: JSON.stringify({ updates }) });
+      const restart = result.requires_restart || [];
+      statusEl.textContent = restart.length ? `Saved. Restart required for: ${restart.join(", ")}` : "Saved. Changes are live.";
+      statusEl.className = "muted small";
+    } catch (err) {
+      statusEl.textContent = `Save failed: ${err.message}`;
+      statusEl.className = "error-text small";
+    }
+  }
+
   // ------------------------------------------------------------------ section navigation
-  const NAV_LABELS = { "card-vix": "VIX", "card-skew": "SKEW", "card-fg": "Fear & Greed", "card-volcomplex": "Vol complex", "card-stocks": "Stocks", "card-comparisons": "Comparisons", "card-china-etfs": "China ETFs / LOFs", "card-breadth": "S&P 500 breadth", "card-global_equities": "Global equities", "card-macro": "Rates", "card-commodities": "Commodities", "card-kalshi": "Fed odds", "card-kalshi-december_hikes": "December hikes", "regime-card": "Regime", "watchlist-card": "Watchlist", "card-screener": "Screener" };
+  const NAV_LABELS = { "card-vix": "VIX", "card-skew": "SKEW", "card-fg": "Fear & Greed", "card-volcomplex": "Vol complex", "card-stocks": "Stocks", "card-comparisons": "Comparisons", "card-breadth": "S&P 500 breadth", "card-global_equities": "Global equities", "card-macro": "Rates", "card-commodities": "Commodities", "card-kalshi": "Fed odds", "card-kalshi-december_hikes": "December hikes", "regime-card": "Regime", "watchlist-card": "Watchlist", "card-screener": "Screener", "card-china-futures": "Futures vs Index", "card-china-etfs": "China ETFs / LOFs", "card-config": "Configuration" };
 
   function initNav() {
-    const nav = $("#section-nav");
-    nav.innerHTML = "";
-    document.querySelectorAll("main .card[id]").forEach((card) => {
-      if (card.classList.contains("hidden")) return;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.textContent = NAV_LABELS[card.id] || (card.querySelector("h2") || {}).textContent || card.id;
-      btn.addEventListener("click", () => {
-        if (card.classList.contains("collapsed")) {
-          setCollapsed(card, false);
-          const all = foldedState(); all[card.id] = false; saveFolded(all); updateFoldAllLabel();
-        }
-        const header = document.querySelector(".topbar").getBoundingClientRect().height;
-        window.scrollTo({ top: card.getBoundingClientRect().top + window.scrollY - header - 10, behavior: "smooth" });
-      });
-      nav.appendChild(btn);
-    });
+    updateNavForTab(state.activeTab);
   }
 
   // ------------------------------------------------------------------ init
   async function init() {
-    loadChinaEtfs();
     try {
       state.config = await api("/api/config");
       buildLiveSections(state.config.live_sections, state.config.live_default_range);
@@ -1675,6 +2085,7 @@
     initFolding();
     setSummary("card-china-etfs", chinaEtfsState.summary);
     initKalshi(state.config && state.config.kalshi_charts);
+    initTabs();
     initNav();
     await loadMarket();
     await Promise.all([...liveSections.values()].map(loadLiveSection));

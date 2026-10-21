@@ -7,8 +7,9 @@ import re
 import threading
 import time
 from contextlib import asynccontextmanager
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
+import yaml
 from fastapi import FastAPI, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -17,10 +18,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from backend.analytics.regime import SCENARIO_BY_KEY, SCENARIOS
-from backend.config import settings
+from backend.config import PROJECT_ROOT, load_settings, settings
 from backend.jobs import DailySnapshotScheduler, IvRankResolver, IvRefreshService, JobManager, MarketService, ScanService, ticker_of
 from backend.logging_setup import setup_logging
 from backend.market_data.china_etfs import ChinaEtfService
+from backend.market_data.china_futures import ChinaFuturesService, RANGES as CHINA_FUTURES_RANGES
 from backend.market_data.fear_greed import FearGreedProvider
 from backend.market_data.indices import IndexHistoryProvider
 from backend.market_data.kalshi import RANGES as KALSHI_RANGES, KalshiService
@@ -40,6 +42,7 @@ macro = MacroService(settings, indices, client)
 market = MarketService(settings, indices, fear_greed, live_vix=lambda: macro.live_value("vix", "VIX"))
 kalshi = KalshiService(settings)
 china_etfs = ChinaEtfService()
+china_futures = ChinaFuturesService(ttl_minutes=cache_ttl)
 iv_ranks = IvRankResolver(settings, indices, db, client)
 scanner = ScanService(settings, client, market, db, iv_ranks)
 jobs = JobManager(scanner, IvRefreshService(settings, client, scanner, iv_ranks, db), db)
@@ -282,6 +285,17 @@ async def api_china_etfs():
     return await china_etfs.snapshot()
 
 
+@app.get("/api/china-futures")
+def api_china_futures(range: str = "1y"):
+    if range.lower() not in CHINA_FUTURES_RANGES:
+        raise HTTPException(status_code=400, detail=f"range must be one of {', '.join(CHINA_FUTURES_RANGES)}")
+    try:
+        return china_futures.snapshot(range.lower())
+    except Exception as exc:
+        log.exception("china futures snapshot failed")
+        raise HTTPException(status_code=503, detail=f"China futures data unavailable: {exc}")
+
+
 @app.get("/api/watchlist")
 def api_watchlist(symbols: Optional[str] = None):
     wanted = normalize_symbols(symbols.split(",") if symbols else settings.default_watchlist)
@@ -346,6 +360,57 @@ def api_config():
             }
             for s in SCENARIOS
         ],
+    }
+
+
+@app.get("/api/config/raw")
+def api_config_raw():
+    return settings._data
+
+
+ALLOWED_CONFIG_SECTIONS = {
+    "server", "logging", "data", "longbridge", "watchlist", "indices",
+    "thresholds", "analytics", "macro", "kalshi", "scenarios",
+    "iv_backfill", "iv_snapshot", "live_sections",
+}
+RESTART_PATHS = {"server.host", "server.port", "logging.level", "logging.file",
+                 "logging.max_bytes", "logging.backup_count"}
+
+
+class ConfigUpdate(BaseModel):
+    path: str = Field(..., min_length=1, max_length=200)
+    value: Any = None
+
+
+class ConfigBatchUpdate(BaseModel):
+    updates: List[ConfigUpdate] = Field(default_factory=list)
+
+
+@app.post("/api/config")
+def api_config_update(batch: ConfigBatchUpdate):
+    cfg_path = PROJECT_ROOT / "config.yaml"
+    with open(cfg_path, "r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    requires_restart = []
+    for update in batch.updates:
+        keys = update.path.split(".")
+        if not keys or keys[0] not in ALLOWED_CONFIG_SECTIONS:
+            raise HTTPException(status_code=400,
+                                detail=f"config path {update.path!r} is not in an allowed section")
+        if update.path in RESTART_PATHS:
+            requires_restart.append(update.path)
+        node = data
+        for key in keys[:-1]:
+            if key not in node or not isinstance(node[key], dict):
+                node[key] = {}
+            node = node[key]
+        node[keys[-1]] = update.value
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        yaml.dump(data, fh, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    settings._data = data
+    return {
+        "status": "saved",
+        "requires_restart": requires_restart,
     }
 
 

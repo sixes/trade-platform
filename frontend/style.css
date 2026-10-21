@@ -25,12 +25,20 @@ h3 { font-size: 16px; }
 .small { font-size: 12px; }
 .hidden { display: none !important; }
 
-.topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 24px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 10; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 24px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 10; flex-wrap: wrap; }
 .topbar-right { display: flex; align-items: center; gap: 10px; flex: none; }
 .topbar-right .btn { white-space: nowrap; }
 .brand { flex: none; }
 .brand h1 { white-space: nowrap; }
 @media (max-width: 1750px) { .subtitle { display: none; } }
+
+/* Tab bar */
+.tab-bar { display: flex; gap: 0; order: 5; }
+.tab-btn { background: transparent; color: var(--muted); border: none; border-bottom: 2px solid transparent; padding: 6px 16px; font-size: 13px; font-weight: 600; cursor: pointer; letter-spacing: 0.02em; text-transform: uppercase; white-space: nowrap; }
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-pane { display: none; }
+.tab-pane.active { display: grid; gap: 16px; }
 .section-nav { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; flex: 1; min-width: 0; }
 .section-nav button { background: transparent; color: var(--muted); border: 1px solid var(--border); padding: 2px 8px; border-radius: 6px; font-size: 11px; cursor: pointer; white-space: nowrap; }
 .section-nav button:hover { color: var(--text); border-color: var(--accent); }
@@ -81,8 +89,8 @@ h3 { font-size: 16px; }
 .banner.waiting .spinner { border-top-color: var(--amber); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-main { padding: 16px 24px 40px; display: grid; gap: 16px; }
-main > *, .grid-3 > * { min-width: 0; }
+main { padding: 16px 24px 40px; }
+main > *, .tab-pane > *, .grid-3 > * { min-width: 0; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 @media (max-width: 1400px) { .grid-3 { grid-template-columns: 1fr 1fr; } .grid-3 > :last-child { grid-column: 1 / -1; } }
 @media (max-width: 900px) { .grid-3 { grid-template-columns: 1fr; } .grid-3 > :last-child { grid-column: auto; } }
@@ -255,12 +263,20 @@ td.flags { white-space: normal; text-align: left; min-width: 140px; }
 #card-china-etfs #china-etfs-refresh:disabled { opacity: .5; cursor: wait; }
 #card-china-etfs .card-body, #card-china-etfs .table-wrap { min-width: 0; max-width: 100%; }
 #card-china-etfs .table-wrap { overflow-x: auto; overscroll-behavior-x: contain; }
-#card-china-etfs table { table-layout: fixed; min-width: 1050px; }
+#card-china-etfs table { table-layout: fixed; min-width: 1200px; }
 #card-china-etfs th, #card-china-etfs td { white-space: normal; overflow-wrap: anywhere; vertical-align: top; }
-#card-china-etfs thead th:first-child { width: 24%; }
-#card-china-etfs thead th:nth-child(2), #card-china-etfs thead th:nth-child(3) { width: 13%; }
-#card-china-etfs thead th:nth-child(4), #card-china-etfs thead th:nth-child(5) { width: 17%; }
-#card-china-etfs thead th:nth-child(6) { width: 16%; }
+#card-china-etfs thead th:first-child { width: 22%; }
+#card-china-etfs thead th:nth-child(2), #card-china-etfs thead th:nth-child(3) { width: 11%; }
+#card-china-etfs thead th:nth-child(4) { width: 11%; }
+#card-china-etfs thead th:nth-child(5) { width: 10%; }
+#card-china-etfs thead th:nth-child(6) { width: 11%; }
+#card-china-etfs thead th:nth-child(7) { width: 12%; }
+#card-china-etfs thead th:nth-child(8) { width: 12%; }
+#card-china-etfs th.sortable { cursor: pointer; user-select: none; }
+#card-china-etfs th.sortable:hover { color: var(--accent); }
+#card-china-etfs th.sortable::after { content: " ⇅"; opacity: 0.3; font-size: 10px; }
+#card-china-etfs th.sort-asc::after { content: " ▲"; opacity: 0.8; }
+#card-china-etfs th.sort-desc::after { content: " ▼"; opacity: 0.8; }
 #card-china-etfs td > b { font-size: 14px; }
 #card-china-etfs td .small { margin-top: 4px; font-size: 11px; }
 #card-china-etfs .china-etfs-group th { text-align: left; background: var(--panel-2); color: var(--text); padding-top: 10px; }
@@ -269,5 +285,31 @@ td.flags { white-space: normal; text-align: left; min-width: 140px; }
 .warnings { color: var(--amber); font-size: 12px; margin-top: 6px; }
 .empty { color: var(--muted); padding: 14px 0; }
 .error-text { color: var(--red); }
+
+/* China futures overlay charts */
+.china-futures-card .macro-chart { height: 280px; }
+.china-futures-metrics { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin: 6px 0 8px; font-variant-numeric: tabular-nums; }
+.china-futures-metrics .value { font-size: 14px; font-weight: 600; }
+.china-futures-metrics .sub { color: var(--muted); font-size: 11px; }
+.basis-positive { color: var(--green); }
+.basis-negative { color: var(--red); }
+
+/* Config editor */
+.config-section { margin-bottom: 12px; }
+.config-section-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; }
+.config-section-head h3 { text-transform: uppercase; font-size: 13px; letter-spacing: 0.04em; color: var(--accent); }
+.config-section-head.collapsed + .config-section-body { display: none; }
+.config-section-head::before { content: "▾"; color: var(--muted); margin-right: 8px; font-size: 11px; }
+.config-section-head.collapsed::before { content: "▸"; }
+.config-group { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px 12px; margin: 8px 0; }
+.config-group legend { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 6px; }
+.config-field { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(38, 50, 65, 0.5); }
+.config-field label { display: flex; flex-direction: column; gap: 2px; }
+.config-label { font-size: 13px; font-weight: 500; }
+.config-desc { font-size: 11px; }
+.config-field input, .config-field select { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px; font-size: 13px; width: 100%; }
+.config-field input[type="checkbox"] { width: auto; justify-self: start; }
+.config-save-row { margin-top: 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+@media (max-width: 700px) { .config-field { grid-template-columns: 1fr; } }
 footer { padding: 0 24px 24px; }
 .symbol-cell { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
