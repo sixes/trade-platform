@@ -138,6 +138,13 @@ def test_index_page_served():
     assert 'id="card-kalshi"' in resp.text and 'id="card-kalshi-december_hikes"' in resp.text
 
 
+def test_frontend_assets_must_revalidate():
+    for path in ("/", "/static/app.js"):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        assert resp.headers["cache-control"] == "no-cache", path
+
+
 def test_watchlist_endpoint_lists_default_tickers_without_suffix():
     data = client.get("/api/watchlist").json()
     assert data["symbols"] == [f"{t}.US" for t in DEFAULT_WATCHLIST]
@@ -157,7 +164,8 @@ def test_macro_endpoint_rejects_unknown_range_and_section():
     assert client.get("/api/macro?range=1d&section=nope").status_code == 404
     config = client.get("/api/config").json()
     sections = {s["id"]: s for s in config["live_sections"]}
-    assert list(sections) == ["vix", "stocks", "global_equities", "macro", "japan_yields", "japan_fx", "us_jp_gaps", "commodities"]
+    assert list(sections) == ["vix", "stocks", "comparisons", "futures_basis", "global_equities", "macro",
+                              "financial_conditions", "japan_yields", "japan_fx", "us_jp_gaps", "commodities"]
     assert sections["stocks"]["chart_mode"] == sections["global_equities"]["chart_mode"] == "percent_change"
     assert sections["global_equities"]["symbols"] is None and sections["global_equities"]["hidden"] is False
     assert all(s["chart_mode"] is None for key, s in sections.items() if key not in ("stocks", "global_equities"))

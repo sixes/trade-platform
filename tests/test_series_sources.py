@@ -233,7 +233,8 @@ def offline_macro(monkeypatch, live=None, sina=None, *, daily=None):
 def test_live_sections_are_declared_and_commodities_snapshot_works(monkeypatch):
     service = offline_macro(monkeypatch)
     sections = {s["id"]: s for s in service.sections()}
-    assert list(sections) == ["vix", "stocks", "global_equities", "macro", "japan_yields", "japan_fx", "us_jp_gaps", "commodities"]
+    assert list(sections) == ["vix", "stocks", "comparisons", "futures_basis", "global_equities", "macro",
+                              "financial_conditions", "japan_yields", "japan_fx", "us_jp_gaps", "commodities"]
     assert sections["vix"]["hidden"] is True and sections["macro"]["hidden"] is False
     assert sections["macro"]["curve"] is True and sections["japan_yields"]["curve"] is False
     assert {key: s["chart_mode"] for key, s in sections.items() if s["chart_mode"] is not None} == {
@@ -843,6 +844,92 @@ def test_asian_equity_latest_date_splits_bars_on_local_midnight_not_utc(monkeypa
     assert (live.day_low, live.day_high) == (101, 102)
     assert live.prev_close == 100 and live.chart_reference is None
     assert calls == [("yahoo", "1d", "5m")]
+
+
+def test_session_window_uses_exchange_clock_for_the_displayed_session(monkeypatch):
+    from datetime import datetime
+
+    payload = yahoo_stock_payload([("2026-11-10T09:00+01:00", 100), ("2026-11-10T11:00+01:00", 101)],
+                                  price=101, prev_close=99.5, stamp="2026-11-10T12:00+01:00")
+    payload["chart"]["result"][0]["meta"]["currentTradingPeriod"] = {"regular": {
+        "start": int(datetime.fromisoformat("2026-11-11T09:00+01:00").timestamp()),
+        "end": int(datetime.fromisoformat("2026-11-11T17:30+01:00").timestamp()),
+    }}
+    service, _ = stock_provider_macro(monkeypatch, yahoo={("1d", "5m"): payload})
+    live = service._yahoo_intraday("^GDAXI", "1d", timezone_name="Europe/Berlin")
+    # Only clock times from the trading period are reused, so a still-open session keeps its full width.
+    assert live.session == {
+        "date": "2026-11-10",
+        "start": "2026-11-10T09:00+01:00",
+        "end": "2026-11-10T17:30+01:00",
+        "timezone": "Europe/Berlin",
+    }
+
+
+def test_session_window_falls_back_to_observed_bars_without_a_trading_period():
+    from backend.market_data.macro import session_window
+
+    bars = [("2026-11-10T09:00+01:00", 1.0), ("2026-11-10T17:30+01:00", 2.0)]
+    assert session_window(bars, "Europe/Berlin", None) == {
+        "date": "2026-11-10", "start": "2026-11-10T09:00+01:00",
+        "end": "2026-11-10T17:30+01:00", "timezone": "Europe/Berlin",
+    }
+    assert session_window(bars[:1], "Europe/Berlin", None) is None
+    assert session_window([], "Europe/Berlin", None) is None
+
+
+def test_next_expiry_uses_quarterly_third_fridays_and_bitcoin_last_fridays():
+    from datetime import date
+    from backend.market_data.macro import next_expiry
+
+    assert next_expiry("2026-11-11", "third_friday") == date(2026, 12, 18)
+    assert next_expiry("2026-12-18", "third_friday") == date(2026, 12, 18)
+    assert next_expiry("2026-11-11", "last_friday") == date(2026, 11, 27)
+    assert next_expiry("2026-11-27", "last_friday") == date(2026, 11, 27)
+
+
+def test_global_equity_snapshot_exposes_the_full_session_window(monkeypatch):
+    from backend.market_data.macro import LiveData
+
+    session = {"date": "2026-11-10", "start": "2026-11-10T09:00+01:00",
+               "end": "2026-11-10T17:30+01:00", "timezone": "Europe/Berlin"}
+    live = LiveData(source="Yahoo ^GDAXI", price=101, prev_close=99.5, as_of="2026-11-10T18:00+01:00",
+                    bars=[("2026-11-10T09:00+01:00", 100), ("2026-11-10T11:00+01:00", 101)], session=session)
+    live.chart_reference = {"kind": "previous_close", "value": 99.5,
+                            "session_date": "2026-11-10", "timezone": "Europe/Berlin"}
+    entry = offline_macro(monkeypatch, {"DAX": live}).snapshot("1d", "global_equities")["items"]["DAX"]
+    assert entry["session"] == session and entry["intraday"] is True
+
+
+def test_spot_futures_basis_gap_and_annualized_carry(monkeypatch):
+    service = offline_macro(monkeypatch, daily={
+        "ndx_basis_futures": [("2026-11-09", 1000.0), ("2026-11-10", 1010.0)],
+        "ndx_basis_spot": [("2026-11-09", 990.0), ("2026-11-10", 1000.0)],
+        "ndx_carry_futures": [("2026-09-17", 1000.0), ("2026-11-09", 1000.0), ("2026-11-10", 1010.0)],
+        "ndx_carry_spot": [("2026-09-17", 990.0), ("2026-11-09", 990.0), ("2026-11-10", 1000.0)],
+        "btc_basis_futures": [("2026-11-09", 100000.0), ("2026-11-10", 101000.0)],
+        "btc_basis_spot": [("2026-11-09", 99000.0), ("2026-11-10", 100000.0)],
+        "btc_carry_futures": [("2026-11-09", 100000.0), ("2026-11-10", 101000.0)],
+        "btc_carry_spot": [("2026-11-09", 99000.0), ("2026-11-10", 100000.0)],
+    })
+    items = service.snapshot("1y", "futures_basis")["items"]
+    assert items["NDX_BASIS"]["series"] == [{"t": "2026-11-09", "v": 10.0}, {"t": "2026-11-10", "v": 10.0}]
+    assert items["BTC_BASIS"]["series"][-1] == {"t": "2026-11-10", "v": 1000.0}
+    # 1% / 38 days and 1% / 17 days to the next expiry, annualized (one day before expiry floors at 7).
+    first = items["NDX_CARRY"]["series"][0]
+    assert first["t"] == "2026-09-17" and first["v"] == pytest.approx((1000 / 990 - 1) * 365 / 7 * 100)
+    assert items["NDX_CARRY"]["metrics"]["value"] == pytest.approx(0.01 * 365 / 38 * 100)
+    assert items["BTC_CARRY"]["metrics"]["value"] == pytest.approx(0.01 * 365 / 17 * 100)
+    assert items["NDX_CARRY"]["unit"] == "pct" and items["NDX_BASIS"]["unit"] == "index"
+
+
+def test_financial_conditions_section_serves_nfci(monkeypatch):
+    entry = offline_macro(monkeypatch, daily={
+        "NFCI": [("2026-10-23", -0.50), ("2026-10-30", -0.459)],
+    }).snapshot("1y", "financial_conditions")["items"]["NFCI"]
+    assert entry["series"] == [{"t": "2026-10-23", "v": -0.50}, {"t": "2026-10-30", "v": -0.459}]
+    assert entry["metrics"]["value"] == pytest.approx(-0.459)
+    assert entry["daily_source"] == "FRED:NFCI" and entry["unit"] == "index"
 
 
 @pytest.mark.parametrize("symbol,tz,local_stamp", [

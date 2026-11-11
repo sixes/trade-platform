@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Any, List, Literal, Optional
 
 import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
@@ -98,6 +98,16 @@ class CacheWarmer:
 
 
 app = FastAPI(title="Trade Plat", version="1.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def revalidate_frontend_assets(request: Request, call_next):
+    # StaticFiles sends validators but no Cache-Control, so browsers can keep serving an old
+    # app.js for hours after a deploy; the page then polls fresh data with stale chart code.
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.exception_handler(RequestValidationError)

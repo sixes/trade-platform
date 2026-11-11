@@ -12,7 +12,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -57,6 +57,7 @@ class LiveData:
     bars_timezone_known: bool = True  # False when the provider supplied naive timestamps.
     chart_source: Optional[str] = None
     chart_reference: Optional[dict] = None
+    session: Optional[dict] = None  # Exchange open/close of the displayed session, when known.
 
 
 def _aware_stamp(value) -> datetime:
@@ -96,6 +97,81 @@ def session_reference(live: LiveData, timezone_name: str) -> Optional[dict]:
         return {"kind": "previous_close", "value": value, "session_date": session_date, "timezone": timezone_name}
     except (ValueError, TypeError, AttributeError, OverflowError):
         return None
+
+
+def session_window(bars: List[Tuple[str, float]], timezone_name: str, trading_period: Optional[dict]) -> Optional[dict]:
+    """Open/close of the session the bars belong to, in the exchange's timezone.
+
+    Yahoo's currentTradingPeriod describes the current (or next) session, so only its clock times are reused for
+    the displayed session's date. That keeps a closed market's chart at the full previous session, and an open
+    market's chart at the full session width with the line ending at the latest bar.
+    """
+    try:
+        tz = ZoneInfo(timezone_name)
+        stamps = sorted(_aware_stamp(t).astimezone(tz) for t, _ in bars)
+    except (ValueError, TypeError, AttributeError, OverflowError, KeyError):
+        return None
+    if not stamps:
+        return None
+    day = stamps[-1].date()
+    session_stamps = [stamp for stamp in stamps if stamp.date() == day]
+    open_at = close_at = None
+    try:
+        start = (trading_period or {}).get("start")
+        end = (trading_period or {}).get("end")
+        if start is not None and end is not None:
+            open_local = datetime.fromtimestamp(int(start), tz)
+            close_local = datetime.fromtimestamp(int(end), tz)
+            open_at = datetime.combine(day, open_local.timetz().replace(tzinfo=None), tzinfo=tz)
+            close_at = datetime.combine(day, close_local.timetz().replace(tzinfo=None), tzinfo=tz)
+    except (TypeError, ValueError, OverflowError, OSError):
+        open_at = close_at = None
+    if open_at is None or close_at is None or close_at <= open_at:
+        if len(session_stamps) < 2:
+            return None
+        open_at, close_at = session_stamps[0], session_stamps[-1]
+    if close_at <= open_at:
+        return None
+    return {
+        "date": day.isoformat(),
+        "start": open_at.isoformat(timespec="minutes"),
+        "end": close_at.isoformat(timespec="minutes"),
+        "timezone": timezone_name,
+    }
+
+
+def _nth_weekday(year: int, month: int, weekday: int, nth: int) -> date:
+    first = date(year, month, 1)
+    offset = (weekday - first.weekday()) % 7
+    return first + timedelta(days=offset + 7 * (nth - 1))
+
+
+def _last_friday(year: int, month: int) -> date:
+    day = date(year, month, calendar.monthrange(year, month)[1])
+    while day.weekday() != 4:
+        day -= timedelta(days=1)
+    return day
+
+
+def next_expiry(day: str, rule: str) -> date:
+    """Expiry of the front contract quoted on `day`: CME equity-index quarters or monthly Bitcoin futures."""
+    start = date.fromisoformat(day)
+    if rule == "last_friday":
+        for offset in range(2):
+            months = start.month - 1 + offset
+            year, month = start.year + months // 12, months % 12 + 1
+            expiry = _last_friday(year, month)
+            if expiry >= start:
+                return expiry
+    for offset in range(8):
+        months = start.month - 1 + offset
+        year, month = start.year + months // 12, months % 12 + 1
+        if month not in (3, 6, 9, 12):
+            continue
+        expiry = _nth_weekday(year, month, 4, 3)
+        if expiry >= start:
+            return expiry
+    return start
 
 
 def latest_stock_session(live: LiveData) -> LiveData:
@@ -314,8 +390,29 @@ class MacroService:
                 return []
             trail.add(key)
             sources = spec.get("sources", [])
-            derived = next((src for src in sources if str(src.get("type", "")).lower() == "derived_spread"), None)
-            if derived:
+            derived = next((src for src in sources if str(src.get("type", "")).lower() in ("derived_spread", "derived_basis")), None)
+            if derived and str(derived.get("type", "")).lower() == "derived_basis":
+                futures = self.indices.try_series(f"{key.lower()}_futures", [derived.get("futures") or {}], fetchers) or []
+                spot = self.indices.try_series(f"{key.lower()}_spot", [derived.get("spot") or {}], fetchers) or []
+                spot_by_date = dict(spot)
+                metric = str(derived.get("metric", "gap")).lower()
+                rule = str(derived.get("expiry", "third_friday")).lower()
+                scale = float(derived.get("scale", 1.0))
+                daily = []
+                for day, future in futures:
+                    cash = spot_by_date.get(day)
+                    if cash is None or cash <= 0:
+                        continue
+                    if metric == "annualized":
+                        # A front contract in its final days makes the denominator collapse; floor it so the
+                        # non-simultaneous closes do not turn into hundred-percent annualized spikes.
+                        days = max((next_expiry(day, rule) - date.fromisoformat(day)).days, 7)
+                        value = (future / cash - 1.0) * 365.0 / days * 100.0 * scale
+                    else:
+                        value = (future - cash) * scale
+                    if math.isfinite(value):
+                        daily.append((day, value))
+            elif derived:
                 left = daily_for(str(derived.get("left", "")).upper(), trail)
                 right = daily_for(str(derived.get("right", "")).upper(), trail)
                 right_by_date = dict(right)
@@ -354,11 +451,12 @@ class MacroService:
             entry["variant"] = variant_name
             entry["variants"] = [{"name": n, "label": (v or {}).get("label", n)} for n, v in (raw_spec.get("variants") or {}).items()]
             entry["note"] = spec.get("note")
-            derived_source = next((src for src in spec.get("sources", []) if str(src.get("type", "")).lower() == "derived_spread"), None)
-            entry["daily_source"] = (
-                derived_source.get("label", "Derived spread") if derived_source
-                else self.indices.source_used.get(series_key.lower())
-            )
+            derived_source = next((src for src in spec.get("sources", []) if str(src.get("type", "")).lower() in ("derived_spread", "derived_basis")), None)
+            if derived_source:
+                default_label = "Derived basis" if str(derived_source.get("type", "")).lower() == "derived_basis" else "Derived spread"
+                entry["daily_source"] = derived_source.get("label", default_label)
+            else:
+                entry["daily_source"] = self.indices.source_used.get(series_key.lower())
             if daily_only and not entry["daily_source"]:
                 configured_sources = []
                 for src in spec.get("sources", []):
@@ -400,6 +498,8 @@ class MacroService:
                     bars_live.chart_reference if session_chart and bars_live and bars_live.chart_reference
                     else {"kind": "first_point_fallback" if session_chart else "first_point", "value": None}
                 )
+            if not stock_1d and entry["intraday"] and bars_live and bars_live.session:
+                entry["session"] = bars_live.session
             if stock_1d:
                 entry["chart_source"] = bars_live.chart_source if entry["intraday"] and bars_live else None
             if stock_1d and entry["intraday"] and not derived_source:
@@ -675,12 +775,16 @@ class MacroService:
         if timezone_name and live.prev_close is not None and not math.isfinite(live.prev_close):
             live.prev_close = None
         if timezone_name and range_key == "1d":
+            # Validate the reference against the whole response first: a multi-session payload cannot claim a
+            # one-session previous close even though the chart is trimmed to the latest session below.
             if meta.get("regularMarketTime"):
                 live.chart_reference = session_reference(live, timezone_name)
             if bars:
                 live.bars = [(t, v) for t, v in bars if t[:10] == bars[-1][0][:10]]
                 live.day_high = max(v for _, v in live.bars)
                 live.day_low = min(v for _, v in live.bars)
+            trading_period = (meta.get("currentTradingPeriod") or {}).get("regular")
+            live.session = session_window(live.bars, timezone_name, trading_period)
         return live
 
     def _longbridge_intraday(self, symbol: str, range_key: str, *, stock_1d: bool = False) -> LiveData:

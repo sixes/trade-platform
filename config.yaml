@@ -210,6 +210,76 @@ live_sections:
         label: Fed target upper
         unit: pct
         sources: [{type: fred, id: DFEDTARU}]
+  - id: futures_basis
+    title: Spot-Futures Basis
+    daily_only: true
+    default_range: 1y
+    ranges: [1m, 3m, 6m, 1y, 3y]
+    refresh_seconds: 1800
+    series:
+      - key: NDX_BASIS
+        label: Nasdaq-100 futures minus spot (index points)
+        unit: index
+        note: "Front-month E-mini Nasdaq-100 (NQ=F) close minus the cash index (^NDX). The two closes are an hour apart, so the gap includes the final hour of trading; no roll or dividend adjustment."
+        sources:
+          - type: derived_basis
+            metric: gap
+            label: "NQ=F - ^NDX"
+            futures: {type: yahoo, symbol: "NQ=F"}
+            spot: {type: yahoo, symbol: "^NDX"}
+      - key: NDX_CARRY
+        label: Nasdaq-100 annualized futures basis (%)
+        unit: pct
+        note: "NQ=F / ^NDX - 1, annualized to the next quarterly expiry (third Friday of Mar/Jun/Sep/Dec), with days to expiry floored at 7 around rolls. The jump around roll dates is expected; there is no dividend or financing adjustment."
+        sources:
+          - type: derived_basis
+            metric: annualized
+            expiry: third_friday
+            label: "NQ=F vs ^NDX annualized"
+            futures: {type: yahoo, symbol: "NQ=F"}
+            spot: {type: yahoo, symbol: "^NDX"}
+      - key: SPX_BASIS
+        label: S&P 500 futures minus spot (index points)
+        unit: index
+        note: "Front-month E-mini S&P 500 (ES=F) close minus the cash index (^GSPC). The two closes are an hour apart, so the gap includes the final hour of trading; no roll or dividend adjustment."
+        sources:
+          - type: derived_basis
+            metric: gap
+            label: "ES=F - ^GSPC"
+            futures: {type: yahoo, symbol: "ES=F"}
+            spot: {type: yahoo, symbol: "^GSPC"}
+      - key: SPX_CARRY
+        label: S&P 500 annualized futures basis (%)
+        unit: pct
+        note: "ES=F / ^GSPC - 1, annualized to the next quarterly expiry (third Friday of Mar/Jun/Sep/Dec), with days to expiry floored at 7 around rolls. The jump around roll dates is expected; there is no dividend or financing adjustment."
+        sources:
+          - type: derived_basis
+            metric: annualized
+            expiry: third_friday
+            label: "ES=F vs ^GSPC annualized"
+            futures: {type: yahoo, symbol: "ES=F"}
+            spot: {type: yahoo, symbol: "^GSPC"}
+      - key: BTC_BASIS
+        label: Bitcoin futures minus spot (USD)
+        unit: usd
+        note: "CME front-month Bitcoin futures (BTC=F) close minus spot (BTC-USD). Crypto trades around the clock, so the two prices are close but not simultaneous."
+        sources:
+          - type: derived_basis
+            metric: gap
+            label: "BTC=F - BTC-USD"
+            futures: {type: yahoo, symbol: "BTC=F"}
+            spot: {type: yahoo, symbol: "BTC-USD"}
+      - key: BTC_CARRY
+        label: Bitcoin annualized futures basis (%)
+        unit: pct
+        note: "BTC=F / BTC-USD - 1, annualized to the last-Friday monthly expiry, with days to expiry floored at 7 around rolls. The jump around roll dates is expected."
+        sources:
+          - type: derived_basis
+            metric: annualized
+            expiry: last_friday
+            label: "BTC=F vs BTC-USD annualized"
+            futures: {type: yahoo, symbol: "BTC=F"}
+            spot: {type: yahoo, symbol: "BTC-USD"}
   - id: global_equities
     title: Global Equity Indices
     chart_mode: percent_change
@@ -304,6 +374,18 @@ live_sections:
         series: [VPC, BIZD]
         after: HYG
         note: "Private-credit and BDC income ETFs on a shared USD price axis; price lines exclude monthly distributions."
+  - id: financial_conditions
+    title: Financial Conditions
+    daily_only: true
+    default_range: 1y
+    ranges: [6m, 1y, 3y, 5y]
+    refresh_seconds: 1800
+    series:
+      - key: NFCI
+        label: Chicago Fed National Financial Conditions Index (weekly, 0 = average)
+        unit: index
+        note: "Positive = tighter than average, negative = looser. Weekly, released Wednesday with a one-week lag."
+        sources: [{type: fred, id: NFCI}]
   - id: japan_yields
     title: Japan Government Bond Yields
     series:

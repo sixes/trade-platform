@@ -440,7 +440,7 @@
         clearSeriesChart(chartKey);
         $(`#live-${sid}-stats-${id}`).insertAdjacentHTML("beforeend", `<span class="sub">chart unavailable - ${typeof Chart === "undefined" ? "chart library not loaded" : "no bars"}</span>`);
       } else if (typeof Chart !== "undefined" && entry.series && entry.series.length) {
-        const session = scopedStock && entry.intraday ? (entry.session || null) : undefined;
+        const session = entry.intraday && (scopedStock || entry.session) ? (entry.session || null) : undefined;
         const percentConfig = percentChart ? { reference: entry.chart_reference, timezone: entry.timezone } : undefined;
         const drawn = drawSeriesChart(chartKey, `#live-${sid}-chart-${id}`, entry.series, LIVE_PALETTE[i % LIVE_PALETTE.length], entry.intraday ? data.range : "daily", unit, name, undefined, session, percentConfig);
         if (drawn === true && baseline) baseline.textContent = state.charts[chartKey].$baselineLabel;
@@ -455,7 +455,11 @@
     ctl.card.querySelector(".curve-summary").textContent = curveParts.length ? `yield curve: ${curveParts.join(" | ")}` : "";
     const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const liveCount = names.filter((n) => items[n].metrics && items[n].metrics.live).length;
-    ctl.card.querySelector(".live-status").innerHTML = `<span class="live-badge"><span class="dot"></span>LIVE</span> ${liveCount}/${names.length} series live · refreshed ${esc(stamp)} · every ${Math.round(data.refresh_seconds || data.live_ttl_seconds || 55)}s`;
+    const dailyOnly = !!(data.section && data.section.daily_only);
+    const every = ` · every ${Math.round(data.refresh_seconds || data.live_ttl_seconds || 55)}s`;
+    ctl.card.querySelector(".live-status").innerHTML = dailyOnly
+      ? `<span class="live-badge off">DAILY</span> ${names.length} series · refreshed ${esc(stamp)}${every}`
+      : `<span class="live-badge"><span class="dot"></span>LIVE</span> ${liveCount}/${names.length} series live · refreshed ${esc(stamp)}${every}`;
     setSummary(ctl.card.id, names.filter((n) => !items[n].error).map((n) => `${n} ${fmtValue(items[n].metrics.value, items[n].unit)}`).join(" · "));
   }
 
@@ -750,12 +754,12 @@
         }).filter((p) => Number.isFinite(p.x) && (!p.dateOnly || new Date(p.x).toISOString().slice(0, 10) === p.t)).sort((a, b) => a.x - b.x);
       }
       if (fixedSession) {
-        if (!session || session.timezone !== "America/New_York") throw new Error("unknown session timezone");
+        if (!session || typeof session.timezone !== "string") throw new Error("unknown session timezone");
         start = timestamp(session.start);
         end = timestamp(session.end);
         sessionTime = new Intl.DateTimeFormat("en-GB", { timeZone: session.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
         sessionStamp = new Intl.DateTimeFormat("en-US", { timeZone: session.timezone, year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short" });
-        if (!Number.isFinite(start) || !Number.isFinite(end) || end - start !== 390 * 60000 || sessionTime.format(start) !== "09:30" || sessionTime.format(end) !== "16:00") throw new Error("invalid session bounds");
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) throw new Error("invalid session bounds");
         // Keep the supplied historical session, including weekend views, and only its real bars.
         points = points.filter((p) => p.x >= start && p.x <= end);
       }
@@ -810,7 +814,7 @@
     if (fixedSession) {
       Object.assign(xScale, {
         type: "linear", min: start, max: end, bounds: "ticks", offset: false,
-        title: { display: true, text: "ET · America/New_York", color: "#8b98a8", font: { size: 10 } },
+        title: { display: true, text: session.timezone === "America/New_York" ? "ET · America/New_York" : session.timezone, color: "#8b98a8", font: { size: 10 } },
         afterBuildTicks: (scale) => {
           // Keep both endpoints even on a 320px phone; add interior ticks only when they fit.
           const minutes = scale.width >= 420 ? [90, 210, 330] : scale.width >= 260 ? [180] : [];
