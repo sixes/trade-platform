@@ -206,19 +206,25 @@
         node.querySelector("h2").textContent = section.title;
         host.appendChild(node);
       }
+      const hasGroups = Array.isArray(section.groups) && section.groups.length > 0;
+      const hasSeries = !!section.has_series;
       const ctl = {
         id: section.id, card: node, curve: !!section.curve, chartMode: section.chart_mode, range: null, timer: null, data: null, inflight: false,
-        groups: section.groups || [], ranges: section.ranges,
+        groups: section.groups || [], hasSeries, ranges: section.ranges,
         storageKey: `trade-plat.liveRange.${section.id}`, defaultRange: section.hidden ? "1y" : (section.default_range || defaultRange || "1d"),
         variantsKey: `trade-plat.liveVariants.${section.id}`, variants: {},
         symbolsKey: `trade-plat.liveSymbols.${section.id}`, symbols: null, defaultSymbols: null,
-        render: section.id === "vix" ? renderVixLive : section.groups?.length ? renderComparisons : null,
+        render: section.id === "vix" ? renderVixLive
+          : hasGroups ? (hasSeries ? renderMixedSection : renderComparisons)
+          : null,
       };
       if (ctl.groups.length) {
-        node.classList.add("comparison-section");
-        node.querySelector(".range-buttons").innerHTML = ctl.ranges.map((range) => `<button data-range="${esc(range)}">${esc(range.toUpperCase())}</button>`).join("");
-        const breadth = document.getElementById("card-breadth");
-        if (breadth) node.after(breadth);
+        node.classList.add(hasSeries ? "mixed-groups" : "comparison-section");
+        if (!hasSeries) {
+          node.querySelector(".range-buttons").innerHTML = ctl.ranges.map((range) => `<button data-range="${esc(range)}">${esc(range.toUpperCase())}</button>`).join("");
+          const breadth = document.getElementById("card-breadth");
+          if (breadth) node.after(breadth);
+        }
       }
       try { ctl.variants = JSON.parse(localStorage.getItem(ctl.variantsKey) || "{}"); } catch (e) { ctl.variants = {}; }
       if (Array.isArray(section.symbols)) initSymbolEditor(ctl, section.symbols);
@@ -310,7 +316,7 @@
       (ctl.render || renderLiveSection)(ctl, data);
       scheduleLiveRefresh(ctl, ((data.refresh_seconds || data.live_ttl_seconds || 55) * 1000) + 300);
     } catch (err) {
-      if (ctl.groups.length) {
+      if (ctl.groups.length && !ctl.hasSeries) {
         ctl.data = null;
         renderComparisons(ctl, {items: {}, error: `Update failed: ${err.message}`});
         scheduleLiveRefresh(ctl, 30000);
@@ -328,6 +334,13 @@
         const badge = document.getElementById(`live-${ctl.id}-badge-${domKey(name)}`);
         if (badge) { badge.className = "live-badge off"; badge.textContent = "UNAVAILABLE"; }
       });
+      if (ctl.groups.length) {
+        ctl.groups.forEach((group) => {
+          clearSeriesChart(`mixed:${ctl.id}:${group.id}`);
+          const message = ctl.card.querySelector(`.comparison-card[data-group="${domKey(group.id)}"] .comparison-message`);
+          if (message) message.textContent = `Overlay unavailable · ${err.message}`;
+        });
+      }
       ctl.card.querySelector(".live-status").textContent = `update failed: ${err.message}`;
       scheduleLiveRefresh(ctl, 30000);
     } finally {
@@ -444,6 +457,94 @@
     const liveCount = names.filter((n) => items[n].metrics && items[n].metrics.live).length;
     ctl.card.querySelector(".live-status").innerHTML = `<span class="live-badge"><span class="dot"></span>LIVE</span> ${liveCount}/${names.length} series live · refreshed ${esc(stamp)} · every ${Math.round(data.refresh_seconds || data.live_ttl_seconds || 55)}s`;
     setSummary(ctl.card.id, names.filter((n) => !items[n].error).map((n) => `${n} ${fmtValue(items[n].metrics.value, items[n].unit)}`).join(" · "));
+  }
+
+  // Sections that mix plain mini charts with overlay group charts (e.g. macro's VPC/BIZD). Series that
+  // belong to a group are drawn only inside the overlay, never as their own mini chart.
+  function renderMixedSection(ctl, data) {
+    const grouped = new Set(ctl.groups.flatMap((group) => group.series));
+    const items = Object.fromEntries(Object.entries(data.items || {}).filter(([name]) => !grouped.has(name)));
+    renderLiveSection(ctl, { ...data, items });
+    const container = ctl.card.querySelector(".macro-grid");
+    ctl.groups.forEach((group) => {
+      let card = container.querySelector(`.comparison-card[data-group="${domKey(group.id)}"]`);
+      if (!card) {
+        card = document.createElement("div");
+        card.className = "macro-card comparison-card";
+        card.dataset.group = group.id;
+        card.innerHTML = `
+          <div class="mini-head"><span><b>${esc(group.title)}</b> <span class="live-badge off">OVERLAY</span></span></div>
+          <div class="comparison-message muted small" role="status"></div>
+          <div class="macro-chart"><canvas></canvas></div>
+          <div class="comparison-sources small"></div>
+          <p class="comparison-note muted small">${esc(group.note || "")} Gaps indicate no observation; no interpolation.</p>`;
+        const anchor = group.after ? container.querySelector(`.macro-card[data-key="${esc(group.after)}"]`) : null;
+        if (anchor) anchor.after(card); else container.appendChild(card);
+      }
+      drawMixedGroup(ctl, group, card, data);
+    });
+  }
+
+  function drawMixedGroup(ctl, group, card, data) {
+    const chartKey = `mixed:${ctl.id}:${group.id}`;
+    clearSeriesChart(chartKey);
+    const entries = group.series.map((name) => data.items?.[name] || {});
+    const values = entries.map((entry) => new Map((entry.error ? [] : entry.series || []).filter((point) =>
+      point && typeof point.t === "string" && Number.isFinite(point.v)
+    ).map((point) => [point.t, point.v])));
+    const missing = group.series.filter((_, i) => ![...values[i].values()].some(Number.isFinite));
+    const labels = [...new Set(values.flatMap((series) => [...series.keys()]))].sort();
+    card.querySelector(".comparison-sources").innerHTML = entries.map((entry, i) => {
+      const metrics = entry.metrics || {};
+      const isMissing = missing.includes(group.series[i]);
+      return `<div><b>${esc(entry.label || group.series[i])}</b>: ${isMissing ? "unavailable" : fmtValue(metrics.value, entry.unit)}${!isMissing && metrics.change != null ? ` · ${fmtChange(metrics.change, entry.unit, metrics.value)}` : ""}<br><span class="muted">${esc(entry.live_source || entry.daily_source || "source unavailable")} · as of ${esc(metrics.as_of || entry.daily_last_date || "unavailable")}</span></div>`;
+    }).join("");
+    let error = data.error || (typeof Chart === "undefined" ? "Chart library unavailable" : "");
+    if (!error && !labels.length) error = "No observations returned";
+    if (!error && missing.length === group.series.length) error = "All series unavailable";
+    card.querySelector(".comparison-message").textContent = error ? `Overlay unavailable · ${error}`
+      : `Price overlay (USD)${missing.length ? ` · Missing series: ${missing.join(", ")}` : ""}`;
+    if (error) return;
+    const colors = ["#38bdf8", "#f5a524", "#a78bfa", "#5eead4", "#5eead4"];
+    const datasets = group.series.map((name, i) => ({
+      label: entries[i].label || name,
+      data: labels.map((stamp) => {
+        const value = values[i].get(stamp);
+        return Number.isFinite(value) ? value : null;
+      }),
+      borderColor: colors[i % colors.length], borderWidth: 1.7,
+      pointBackgroundColor: colors[i % colors.length],
+      pointRadius: (context) => {
+        const points = context.dataset.data, index = context.dataIndex;
+        return Number.isFinite(points[index]) && !Number.isFinite(points[index - 1]) && !Number.isFinite(points[index + 1]) ? 3 : 0;
+      },
+      pointHitRadius: 10, tension: 0, spanGaps: false, fill: false,
+    }));
+    const intraday = labels.some((label) => label.includes("T"));
+    state.charts[chartKey] = new Chart(card.querySelector("canvas"), {
+      type: "line", plugins: [crosshairPlugin], data: {labels, datasets},
+      options: {
+        animation: false, responsive: true, maintainAspectRatio: false,
+        interaction: {mode: "index", intersect: false},
+        plugins: {
+          legend: {display: true, position: "bottom", labels: {color: "#e6edf3", boxWidth: 20, boxHeight: 0, font: {size: 11}}},
+          crosshair: {format: (value) => num(value, 2)},
+          tooltip: {callbacks: {
+            title: (items) => items[0]?.label || "",
+            label: (item) => `${item.dataset.label}: ${fmtPrecise(item.parsed.y, entries[item.datasetIndex].unit)}`,
+            afterBody: (items) => {
+              const stamp = items[0]?.label;
+              return group.series.filter((_, i) => !Number.isFinite(values[i].get(stamp))).map((name) => `${name}: no observation`);
+            },
+          }},
+        },
+        scales: {
+          x: {ticks: {color: "#8b98a8", maxTicksLimit: (context) => context.chart.width < 400 ? 2 : 5, maxRotation: 0, font: {size: 10},
+            callback: (value, index) => { const label = labels[index]; return label ? (intraday ? label.slice(11, 16) : label) : ""; }}, grid: {color: "#263241"}},
+          y: {title: {display: true, text: "Price (USD)", color: "#8b98a8"}, ticks: {color: "#8b98a8", maxTicksLimit: 6, callback: (value) => num(value, 2)}, grid: {color: "#263241"}},
+        },
+      },
+    });
   }
 
   function renderComparisons(ctl, data) {
@@ -1455,16 +1556,17 @@
     setSummary("card-china-etfs", message);
   }
 
+  const CHINA_ETF_THEAD = `<thead><tr><th scope="col" class="sortable" data-col="0">Fund name</th><th scope="col" class="sortable" data-col="1">Close (CNY)</th><th scope="col" class="sortable" data-col="2">NAV (CNY)</th><th scope="col" class="sortable" data-col="3">Close/NAV</th><th scope="col" class="sortable" data-col="4">IOPV</th><th scope="col" class="sortable" data-col="5">Close/IOPV</th><th scope="col" class="sortable" data-col="6">Fees (annual)</th><th scope="col" class="sortable" data-col="7">AUM (CNY bn)</th></tr></thead>`;
+
   function renderChinaEtfs(data) {
     const items = data.items || [];
-    const rows = ["Nasdaq-100", "S&P 500"].map((index) => {
+    const container = $("#china-etfs-table");
+    const tables = ["Nasdaq-100", "S&P 500"].map((index) => {
       const group = items.filter((item) => item.index === index);
-      return group.length ? `<tbody><tr class="china-etfs-group"><th colspan="8" scope="rowgroup">${esc(index)}</th></tr>${group.map(chinaEtfRow).join("")}</tbody>` : "";
+      if (!group.length) return "";
+      return `<div class="china-etfs-index-block"><h3>${esc(index)}</h3><div class="table-wrap"><table class="china-etfs-sortable" aria-label="${esc(index)} ETFs and LOFs">${CHINA_ETF_THEAD}<tbody>${group.map(chinaEtfRow).join("")}</tbody></table></div></div>`;
     }).join("");
-    $("#china-etfs-table").innerHTML = `<table aria-label="Mainland China US-index ETFs and LOFs">
-      <thead><tr><th scope="col" class="sortable" data-col="0">Fund name</th><th scope="col" class="sortable" data-col="1">Close (CNY)</th><th scope="col" class="sortable" data-col="2">NAV (CNY)</th><th scope="col" class="sortable" data-col="3">Close/NAV</th><th scope="col" class="sortable" data-col="4">IOPV</th><th scope="col" class="sortable" data-col="5">Close/IOPV</th><th scope="col" class="sortable" data-col="6">Fees (annual)</th><th scope="col" class="sortable" data-col="7">AUM (CNY bn)</th></tr></thead>
-      ${rows || `<tbody><tr><td colspan="8" class="left empty">${data.refreshing ? "Loading fund reference data; backend refreshing..." : "Fund reference data unavailable."}</td></tr></tbody>`}
-    </table>`;
+    container.innerHTML = tables || `<div class="empty">${data.refreshing ? "Loading fund reference data; backend refreshing..." : "Fund reference data unavailable."}</div>`;
     initChinaEtfSort();
     const partial = items.some((item) => [item.close.value, item.nav.value, item.premium_pct, item.profile.management_fee_pct, item.profile.custody_fee_pct, item.profile.aum_cny].some((value) => !Number.isFinite(value)) || [item.close, item.nav, item.profile].some((part) => part.status === "unavailable"));
     const stale = items.filter((item) => [item.close, item.nav, item.profile].some((part) => part.status === "stale")).length;
@@ -1481,26 +1583,27 @@
   const chinaEtfSortState = { col: -1, asc: true };
 
   function initChinaEtfSort() {
-    const table = $("#china-etfs-table table");
-    if (!table) return;
-    table.querySelectorAll("th.sortable").forEach((th) => {
-      th.addEventListener("click", () => {
-        const col = parseInt(th.dataset.col, 10);
-        if (chinaEtfSortState.col === col) chinaEtfSortState.asc = !chinaEtfSortState.asc;
-        else { chinaEtfSortState.col = col; chinaEtfSortState.asc = true; }
-        applyChinaEtfSort();
+    $("#china-etfs-table").querySelectorAll("table.china-etfs-sortable").forEach((table) => {
+      table.querySelectorAll("th.sortable").forEach((th) => {
+        th.addEventListener("click", () => {
+          const col = parseInt(th.dataset.col, 10);
+          if (chinaEtfSortState.col === col) chinaEtfSortState.asc = !chinaEtfSortState.asc;
+          else { chinaEtfSortState.col = col; chinaEtfSortState.asc = true; }
+          applyChinaEtfSort();
+        });
       });
     });
     if (chinaEtfSortState.col >= 0) applyChinaEtfSort();
   }
 
   function applyChinaEtfSort() {
-    const table = $("#china-etfs-table table");
-    if (!table || chinaEtfSortState.col < 0) return;
-    sortChinaEtfTable(table, chinaEtfSortState.col, chinaEtfSortState.asc);
-    table.querySelectorAll("th.sortable").forEach((h) => h.classList.remove("sort-asc", "sort-desc"));
-    const th = table.querySelector(`th[data-col="${chinaEtfSortState.col}"]`);
-    if (th) th.classList.add(chinaEtfSortState.asc ? "sort-asc" : "sort-desc");
+    if (chinaEtfSortState.col < 0) return;
+    $("#china-etfs-table").querySelectorAll("table.china-etfs-sortable").forEach((table) => {
+      sortChinaEtfTable(table, chinaEtfSortState.col, chinaEtfSortState.asc);
+      table.querySelectorAll("th.sortable").forEach((h) => h.classList.remove("sort-asc", "sort-desc"));
+      const th = table.querySelector(`th[data-col="${chinaEtfSortState.col}"]`);
+      if (th) th.classList.add(chinaEtfSortState.asc ? "sort-asc" : "sort-desc");
+    });
   }
 
   function sortChinaEtfTable(table, col, asc) {

@@ -164,6 +164,11 @@ live_sections:
         mode: price_change
         series: [SMH, KOSPI]
         note: "Local-currency price changes, not FX-adjusted or dividend-inclusive returns. Same-date Seoul and New York closes are not simultaneous."
+      - id: kospi_gold
+        title: KOSPI / Gold (XAU)
+        mode: price_change
+        series: [KOSPI, XAU]
+        note: "KOSPI closes in KRW versus London spot gold in USD, normalized to a shared baseline date. Seoul closes and London gold fixings are not simultaneous and FX is not adjusted."
       - id: rates_fed
         title: Treasury yields / Fed policy
         mode: rate_level
@@ -181,6 +186,10 @@ live_sections:
         unit: index
         timezone: Asia/Seoul
         sources: [{type: yahoo, symbol: "^KS11", timezone: Asia/Seoul}]
+      - key: XAU
+        label: Gold spot XAU/USD
+        unit: usd
+        sources: [{type: sina, symbol: XAU, label: "Sina spot gold"}, {type: yahoo, symbol: "GC=F", label: "Gold futures (history fallback)"}]
       - key: US2Y
         label: US 2-year Treasury
         unit: pct
@@ -269,6 +278,16 @@ live_sections:
         unit: usd
         sources: [{type: longbridge, symbol: HYG.US}, {type: yahoo, symbol: HYG}]
         live: [{type: longbridge, symbol: HYG.US}, {type: yahoo, symbol: HYG}]
+      - key: VPC
+        label: Virtus Private Credit Strategy ETF
+        unit: usd
+        sources: [{type: longbridge, symbol: VPC.US}, {type: yahoo, symbol: VPC}]
+        live: [{type: longbridge, symbol: VPC.US}, {type: yahoo, symbol: VPC}]
+      - key: BIZD
+        label: VanEck BDC Income ETF
+        unit: usd
+        sources: [{type: longbridge, symbol: BIZD.US}, {type: yahoo, symbol: BIZD}]
+        live: [{type: longbridge, symbol: BIZD.US}, {type: yahoo, symbol: BIZD}]
       - key: DXY
         label: ICE US Dollar Index
         unit: index
@@ -276,6 +295,15 @@ live_sections:
           - {type: yahoo, symbol: DX-Y.NYB, label: "ICE DXY via Yahoo"}
           - {type: fred, id: DTWEXBGS, label: "Fed broad dollar index (fallback, different scale)"}
         live: [{type: yahoo, symbol: DX-Y.NYB}]
+    groups:
+      # Overlay shown after the HYG mini chart. Both are USD-priced ETFs, so they share one price axis;
+      # their monthly distributions are not part of the price lines.
+      - id: private_credit
+        title: VPC ETF / BIZD ETF
+        mode: price_level
+        series: [VPC, BIZD]
+        after: HYG
+        note: "Private-credit and BDC income ETFs on a shared USD price axis; price lines exclude monthly distributions."
   - id: japan_yields
     title: Japan Government Bond Yields
     series:

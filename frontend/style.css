@@ -132,6 +132,9 @@ main > *, .tab-pane > *, .grid-3 > * { min-width: 0; }
 .macro-stats .sub { color: var(--muted); font-size: 11px; }
 .macro-chart { position: relative; height: 200px; }
 .comparison-section .macro-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* Overlay groups inside a series section (e.g. macro's VPC/BIZD) get a wider cell than a mini chart. */
+.mixed-groups .macro-grid .comparison-card { grid-column: span 2; }
+@media (max-width: 700px) { .mixed-groups .macro-grid .comparison-card { grid-column: span 1; } }
 .comparison-card .mini-head { padding-right: 0; flex-wrap: wrap; }
 .comparison-card .macro-chart { height: 310px; margin: 10px 0; }
 .comparison-message { min-height: 36px; margin-top: 8px; }
@@ -263,6 +266,9 @@ td.flags { white-space: normal; text-align: left; min-width: 140px; }
 #card-china-etfs #china-etfs-refresh:disabled { opacity: .5; cursor: wait; }
 #card-china-etfs .card-body, #card-china-etfs .table-wrap { min-width: 0; max-width: 100%; }
 #card-china-etfs .table-wrap { overflow-x: auto; overscroll-behavior-x: contain; }
+#card-china-etfs .china-etfs-index-block { margin-bottom: 18px; }
+#card-china-etfs .china-etfs-index-block h3 { font-size: 14px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+#card-china-etfs .china-etfs-index-block .table-wrap { overflow-x: auto; overscroll-behavior-x: contain; }
 #card-china-etfs table { table-layout: fixed; min-width: 1200px; }
 #card-china-etfs th, #card-china-etfs td { white-space: normal; overflow-wrap: anywhere; vertical-align: top; }
 #card-china-etfs thead th:first-child { width: 22%; }
@@ -279,7 +285,6 @@ td.flags { white-space: normal; text-align: left; min-width: 140px; }
 #card-china-etfs th.sort-desc::after { content: " ▼"; opacity: 0.8; }
 #card-china-etfs td > b { font-size: 14px; }
 #card-china-etfs td .small { margin-top: 4px; font-size: 11px; }
-#card-china-etfs .china-etfs-group th { text-align: left; background: var(--panel-2); color: var(--text); padding-top: 10px; }
 #card-china-etfs .china-etfs-warning, #card-china-etfs .china-etfs-premium { color: var(--amber); font-weight: 600; }
 #card-china-etfs .china-etfs-note { margin: 10px 0 0; overflow-wrap: anywhere; }
 .warnings { color: var(--amber); font-size: 12px; margin-top: 6px; }

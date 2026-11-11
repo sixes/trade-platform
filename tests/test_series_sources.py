@@ -156,7 +156,7 @@ class StubProvider:
 
     def try_series(self, key, sources, fetch=None):
         curve = {"US2Y": 4.71, "US5Y": 4.83, "US10Y": 4.96, "US30Y": 5.29, "VXTLT": 16.7,
-                 "JP2Y": 1.02, "JP5Y": 1.35, "JP10Y": 1.76, "JP30Y": 4.12, "HYG": 78.1, "DXY": 101.1,
+                 "JP2Y": 1.02, "JP5Y": 1.35, "JP10Y": 1.76, "JP30Y": 4.12, "HYG": 78.1, "VPC": 24.5, "BIZD": 19.2, "DXY": 101.1,
                  "USDJPY": 152.3, "JYVIX_PROXY": 28.7, "JPVL_PROXY": 24.2, "G5_COLV_PROXY": 17.4,
                  "GOLD_SPOT": 4320.0, "GOLD_FUTURES": 4322.0, "GOLD_ETF": 392.9, "SILVER_SPOT": 64.0, "SILVER_FUTURES": 64.6, "SILVER_ETF": 58.2,
                  "BRENT_SPOT": 114.9, "BRENT_FUTURES": 97.5, "WTI_SPOT": 96.4, "WTI_FUTURES": 91.6, "COPPER": 6.77,
@@ -542,11 +542,20 @@ def test_macro_snapshot_daily_ranges_and_curve_without_live_feeds(monkeypatch):
     service = offline_macro(monkeypatch)
     snap = service.snapshot("3m")
     items = snap["items"]
-    assert list(items) == ["US2Y", "US5Y", "US10Y", "US30Y", "VXTLT", "HYG", "DXY"]
+    assert list(items) == ["US2Y", "US5Y", "US10Y", "US30Y", "VXTLT", "HYG", "VPC", "BIZD", "DXY"]
     assert items["US2Y"]["unit"] == "pct" and items["US2Y"]["metrics"]["value"] == pytest.approx(4.71)
     assert items["US2Y"]["live_note"].startswith("daily data only")
     assert items["US10Y"]["metrics"]["live"] is False and items["US10Y"]["live_note"] == "no live feed reachable"
     assert items["HYG"]["daily_source"] == "stub:HYG"
+    assert items["VPC"]["unit"] == "usd" and items["BIZD"]["unit"] == "usd"
+    groups = snap["section"]["groups"]
+    assert [group["id"] for group in groups] == ["private_credit"]
+    assert groups[0]["series"] == ["VPC", "BIZD"] and groups[0]["after"] == "HYG"
+    assert snap["section"]["has_series"] is True
+    comparisons = next(section for section in service.sections() if section["id"] == "comparisons")
+    assert comparisons["has_series"] is False  # every comparisons series feeds a group
+    assert [group["id"] for group in comparisons["groups"]] == ["smh_kospi", "kospi_gold", "rates_fed"]
+    assert comparisons["groups"][1]["series"] == ["KOSPI", "XAU"]
     assert items["VXTLT"]["unit"] == "index" and items["VXTLT"]["metrics"]["value"] == pytest.approx(16.7) and "TLT" in items["VXTLT"]["note"]
     assert len(items["US10Y"]["series"]) == 22 and items["US10Y"]["series"][-1]["t"] == "2026-09-22"
     assert snap["curve"]["2s10s"]["bp"] == pytest.approx(25.0) and snap["curve"]["2s10s"]["state"] == "normal"
@@ -556,6 +565,27 @@ def test_macro_snapshot_daily_ranges_and_curve_without_live_feeds(monkeypatch):
     for key in ("US10Y", "DXY"):
         entry = intraday["items"][key]
         assert entry["intraday"] is False and entry["fallback"] == "daily" and len(entry["series"]) == 22
+
+
+def test_daily_only_comparisons_keep_external_history_fetchers(monkeypatch):
+    from backend.market_data.macro import MacroService
+
+    class FetchSpyProvider(StubProvider):
+        def __init__(self):
+            super().__init__()
+            self.fetchers = set()
+            self.keys = []
+
+        def try_series(self, key, sources, fetch=None):
+            self.keys.append(key.upper())
+            self.fetchers.update((fetch or {}).keys())
+            return super().try_series(key, sources, fetch)
+
+    provider = FetchSpyProvider()
+    snap = MacroService(SETTINGS, provider, None, sina=FakeSina()).snapshot("1m", "comparisons")
+    assert "XAU" in provider.keys
+    assert "sina" in provider.fetchers  # spot-gold history stays available in daily-only sections
+    assert [group["id"] for group in snap["section"]["groups"]] == ["smh_kospi", "kospi_gold", "rates_fed"]
 
 
 def test_japan_fx_and_us_japan_gap_sections(monkeypatch):

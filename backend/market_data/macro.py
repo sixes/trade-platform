@@ -178,13 +178,19 @@ class MacroService:
         for section in self.settings.get("live_sections", []) or []:
             if section.get("id"):
                 symbols = section.get("symbols")
+                groups = section["groups"] if isinstance(section.get("groups"), list) else []
+                group_keys = {str(key).upper() for group in groups for key in group.get("series", [])}
+                series_keys = [str(spec["key"]).upper() for spec in (section.get("series") or []) if spec.get("key")]
                 out.append({
                     "id": str(section["id"]),
                     "title": section.get("title", section["id"]),
                     "curve": bool(section.get("curve", False)),
                     "hidden": bool(section.get("hidden", False)),
                     "chart_mode": section.get("chart_mode"),
-                    "groups": section["groups"] if isinstance(section.get("groups"), list) else [],
+                    "groups": groups,
+                    # Only series outside a group get their own mini chart; a section whose series all feed
+                    # groups (e.g. the daily comparisons) renders as overlay cards alone.
+                    "has_series": any(key not in group_keys for key in series_keys),
                     "daily_only": bool(section.get("daily_only", False)),
                     "ranges": section["ranges"] if isinstance(section.get("ranges"), list) else list(RANGE_KEYS),
                     "default_range": section.get("default_range", self.settings.get("macro.default_range", "1d")),
@@ -266,7 +272,8 @@ class MacroService:
             window_end = end.isoformat()
         intraday = range_key in INTRADAY_RANGES and not daily_only
         history_days = int(self.settings.get("data.history_days", 1260))
-        fetchers = {} if daily_only else self.external_fetchers()
+        # Daily-only sections still need non-Yahoo history (e.g. Sina spot XAU for an overlay group).
+        fetchers = self.external_fetchers()
         available_types = BUILTIN_SOURCE_TYPES | set(fetchers)
         variants = {str(k).upper(): str(v) for k, v in (variants or {}).items()}
         live_ttl = section["live_ttl_seconds"]
