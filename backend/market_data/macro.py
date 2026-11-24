@@ -670,6 +670,8 @@ class MacroService:
                     # groups (e.g. the daily comparisons) renders as overlay cards alone.
                     "has_series": any(key not in group_keys for key in series_keys),
                     "daily_only": bool(section.get("daily_only", False)),
+                    # UI tab: live tape stays on Markets, daily/infrequent data moves to Macro & Fundamentals.
+                    "tab": "macro" if str(section.get("tab", "")).lower() == "macro" else "markets",
                     "ranges": section["ranges"] if isinstance(section.get("ranges"), list) else list(RANGE_KEYS),
                     "default_range": section.get("default_range", self.settings.get("macro.default_range", "1d")),
                     "refresh_seconds": float(section.get("refresh_seconds", self.live_ttl)),

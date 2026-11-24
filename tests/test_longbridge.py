@@ -63,12 +63,35 @@ def test_option_quotes_decode_sides_and_exact_strikes_without_changing_batching(
     assert [vars(q) for q in quotes] == original
 
 
+def test_option_quotes_accept_adjusted_roots_containing_digits():
+    # LongPort returns adjusted OPRA series as B1SPY.../B1VDA...; these aborted NVDA scans.
+    quotes = [
+        sdk_quote("B1SPY261120P700000.US", underlying_symbol="SPY.US",
+                  expiry_date=date(2026, 11, 20), strike_price=Decimal("700")),
+        sdk_quote("B1VDA261211P160000.US", underlying_symbol="NVDA.US",
+                  expiry_date=date(2026, 12, 11), strike_price=Decimal("160")),
+    ]
+    rows = quote_client(quotes).option_quotes([q.symbol for q in quotes])
+
+    assert [r.option_side for r in rows] == ["put", "put"]
+    assert [r.symbol for r in rows] == [q.symbol for q in quotes]
+    assert [r.underlying for r in rows] == ["SPY.US", "NVDA.US"]
+
+
+def test_adjusted_root_quotes_still_require_matching_identity():
+    quote = sdk_quote("B1VDA261211P160000.US", underlying_symbol="NVDA.US",
+                      expiry_date=date(2026, 12, 11), strike_price=Decimal("160.5"))
+    with pytest.raises(LongbridgeError, match="option quote identity mismatch"):
+        quote_client([quote]).option_quotes([quote.symbol])
+
+
 @pytest.mark.parametrize("symbol", [
     "SPY.US", "SPY261023X104125.US", "SPY261023104125.US",
     "junkSPY261023C104125.US", "SPY261023C104125.US.extra",
     "SPY261023C104125.US\n", "SPY261023c104125.US", "SPY261023C104125",
     "SPY261023C000104125.US", "SPY 261023C104125.US",
-    "SPY261332C104125.US", "SPY260230P104125.US", "", None,
+    "SPY261332C104125.US", "SPY260230P104125.US",
+    "1BSPY261023C104125.US", "B1vda261023C104125.US", "", None,
 ])
 def test_option_quotes_reject_unrecognized_or_invalid_symbols(symbol):
     client = quote_client([sdk_quote(symbol)])

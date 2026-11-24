@@ -153,6 +153,7 @@ live_sections:
     live_ttl_seconds: 15
     symbols: [SOXL, TECL, UPRO, SPXL]   # US tickers; ".US" is added automatically
   - id: comparisons
+    tab: macro
     title: Market Comparisons
     daily_only: true
     default_range: 1y
@@ -211,6 +212,7 @@ live_sections:
         unit: pct
         sources: [{type: fred, id: DFEDTARU}]
   - id: futures_basis
+    tab: macro
     title: Spot-Futures Basis
     daily_only: true
     default_range: 1y
@@ -281,6 +283,7 @@ live_sections:
             futures: {type: yahoo, symbol: "BTC=F"}
             spot: {type: yahoo, symbol: "BTC-USD"}
   - id: global_equities
+    tab: macro
     title: Global Equity Indices
     chart_mode: percent_change
     series:
@@ -315,6 +318,7 @@ live_sections:
         sources: [{type: yahoo, symbol: "^KS11", timezone: Asia/Seoul}]
         live: [{type: yahoo, symbol: "^KS11", timezone: Asia/Seoul}]
   - id: macro
+    tab: macro
     title: Rates, Credit & Dollar
     curve: true            # show Treasury curve spreads in the header
     series:
@@ -375,6 +379,7 @@ live_sections:
         after: HYG
         note: "Private-credit and BDC income ETFs on a shared USD price axis; price lines exclude monthly distributions."
   - id: inflation
+    tab: macro
     title: Inflation
     daily_only: true
     default_range: 5y
@@ -409,6 +414,7 @@ live_sections:
         note: "Sticky Price CPI less Food and Energy, already expressed as a year-over-year percent change."
         sources: [{type: fred, id: CORESTICKM159SFRBATL, label: "Atlanta Fed sticky CPI via FRED"}]
   - id: labor
+    tab: macro
     title: Labor Demand
     daily_only: true
     default_range: 3y
@@ -451,6 +457,7 @@ live_sections:
         unit: k
         sources: [{type: fred, id: CCSA, scale: 0.001, label: "DOL via FRED"}]
   - id: pmi
+    tab: macro
     title: ISM PMI
     daily_only: true
     default_range: 5y
@@ -474,6 +481,7 @@ live_sections:
         unit: index
         sources: [{type: ism, kind: services, pages: 14, label: "ISM via PR Newswire"}]
   - id: nowcasts
+    tab: macro
     title: Nowcasts
     daily_only: true
     default_range: 3y
@@ -518,6 +526,7 @@ live_sections:
         unit: pct
         sources: [{type: fred, id: PCEPILFE, transform: yoy, label: "BEA core PCE via FRED"}]
   - id: housing
+    tab: macro
     title: Housing
     daily_only: true
     default_range: 5y
@@ -559,6 +568,7 @@ live_sections:
         unit: usd
         sources: [{type: zillow_zori, label: "Zillow ZORI"}]
   - id: consumer
+    tab: macro
     title: Consumer
     daily_only: true
     default_range: 1y
@@ -588,6 +598,7 @@ live_sections:
         unit: usd
         sources: [{type: fred, id: GASREGW, label: "EIA via FRED"}]
   - id: sentiment
+    tab: macro
     title: Sentiment, Breadth & Valuation
     daily_only: true
     default_range: 5y
@@ -731,6 +742,7 @@ live_sections:
         unit: pct
         sources: [{type: fred, id: BAMLH0A0HYM2, label: "ICE BofA via FRED"}]
   - id: financial_conditions
+    tab: macro
     title: Financial Conditions
     daily_only: true
     default_range: 1y
@@ -743,6 +755,7 @@ live_sections:
         note: "Positive = tighter than average, negative = looser. Weekly, released Wednesday with a one-week lag."
         sources: [{type: fred, id: NFCI}]
   - id: japan_yields
+    tab: macro
     title: Japan Government Bond Yields
     series:
       - key: JP2Y
@@ -766,6 +779,7 @@ live_sections:
         note: "Japan MOF par yield curve, published once a day after the Tokyo close (no intraday data)."
         sources: [{type: mof_jgb, tenor: 30Y, label: "Japan MOF"}]
   - id: japan_fx
+    tab: macro
     title: Japan FX & Volatility
     series:
       - key: USDJPY
@@ -792,6 +806,7 @@ live_sections:
         sources: [{type: yahoo, symbol: CEW, label: "Yahoo CEW proxy"}]
         live: [{type: yahoo, symbol: CEW}]
   - id: us_jp_gaps
+    tab: macro
     title: US - Japan Government Yield Gaps
     series:
       - key: USJP2Y

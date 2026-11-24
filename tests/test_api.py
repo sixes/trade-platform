@@ -167,6 +167,11 @@ def test_macro_endpoint_rejects_unknown_range_and_section():
     assert list(sections) == ["vix", "stocks", "comparisons", "futures_basis", "global_equities", "macro",
                               "inflation", "labor", "pmi", "nowcasts", "housing", "consumer", "sentiment",
                               "financial_conditions", "japan_yields", "japan_fx", "us_jp_gaps", "commodities"]
+    assert sections["stocks"]["tab"] == "markets" and sections["commodities"]["tab"] == "markets"
+    assert all(sections[key]["tab"] == "macro" for key in (
+        "comparisons", "futures_basis", "global_equities", "macro", "inflation", "labor", "pmi",
+        "nowcasts", "housing", "consumer", "sentiment", "financial_conditions", "japan_yields",
+        "japan_fx", "us_jp_gaps"))
     assert sections["stocks"]["chart_mode"] == sections["global_equities"]["chart_mode"] == "percent_change"
     assert sections["global_equities"]["symbols"] is None and sections["global_equities"]["hidden"] is False
     assert all(s["chart_mode"] is None for key, s in sections.items() if key not in ("stocks", "global_equities"))

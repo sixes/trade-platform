@@ -1,9 +1,25 @@
+from datetime import datetime, timezone
+
 import pytest
 
+import backend.market_data.kalshi as kalshi
 from backend.config import Settings, load_settings
 from backend.market_data.kalshi import KalshiClient, KalshiService
 
 SETTINGS = load_settings()
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch):
+    # Keep the fixture calendar deterministic instead of expiring when the real date advances.
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+            return fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+
+    monkeypatch.setattr(kalshi, "datetime", FrozenDateTime)
+
 
 EVENTS = {"events": [
     {"event_ticker": "KXFEDDECISION-27DEC", "title": "Fed decision in Dec 2027?", "sub_title": "On Dec 15, 2027", "strike_date": "2027-12-15T19:00:00Z", "mutually_exclusive": True},

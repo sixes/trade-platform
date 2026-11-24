@@ -18,7 +18,8 @@ T = TypeVar("T")
 
 OPTION_QUOTA_CODE = 301607  # "Too many option securities request within one minute"
 # LongPort thousandths strikes may omit OCC's leading zero padding.
-OPTION_SYMBOL_RE = re.compile(r"([A-Z]{1,6})([0-9]{6})([CP])([0-9]{1,8})\.US")
+# Adjusted OPRA series carry digit-bearing roots (e.g. B1SPY, B1VDA), so the root is alphanumeric.
+OPTION_SYMBOL_RE = re.compile(r"([A-Z][A-Z0-9]{0,5})([0-9]{6})([CP])([0-9]{1,8})\.US")
 
 
 class LongbridgeError(Exception):

@@ -27,7 +27,7 @@
 
   // ------------------------------------------------------------------ tabs
   const TAB_STORAGE_KEY = "trade-plat.activeTab";
-  const TABS = ["markets", "china", "config"];
+  const TABS = ["markets", "macro", "china", "config"];
   const chinaTabLoaded = { futures: false, etfs: false };
   const configTabLoaded = { loaded: false };
 
@@ -194,7 +194,8 @@
   }
 
   function buildLiveSections(sections, defaultRange) {
-    const host = $("#live-sections");
+    const liveHost = $("#live-sections");
+    const macroHost = $("#macro-sections");
     const template = $("#live-section-template");
     (sections || []).forEach((section) => {
       let node;
@@ -206,7 +207,7 @@
         node = template.content.firstElementChild.cloneNode(true);
         node.id = `card-${section.id}`;
         node.querySelector("h2").textContent = section.title;
-        host.appendChild(node);
+        (section.tab === "macro" ? macroHost : liveHost).appendChild(node);
       }
       const hasGroups = Array.isArray(section.groups) && section.groups.length > 0;
       const hasSeries = !!section.has_series;
@@ -225,10 +226,6 @@
         if (section.daily_only) {
           // Daily-only sections chart calendar windows, so hide the intraday buttons they cannot serve.
           node.querySelector(".range-buttons").innerHTML = ctl.ranges.map((range) => `<button data-range="${esc(range)}">${esc(range.toUpperCase())}</button>`).join("");
-          if (!hasSeries && section.id === "comparisons") {
-            const breadth = document.getElementById("card-breadth");
-            if (breadth) node.after(breadth);
-          }
         }
       }
       try { ctl.variants = JSON.parse(localStorage.getItem(ctl.variantsKey) || "{}"); } catch (e) { ctl.variants = {}; }
@@ -2265,7 +2262,7 @@
   }
 
   // ------------------------------------------------------------------ section navigation
-  const NAV_LABELS = { "card-vix": "VIX", "card-skew": "SKEW", "card-fg": "Fear & Greed", "card-volcomplex": "Vol complex", "card-stocks": "Stocks", "card-comparisons": "Comparisons", "card-breadth": "S&P 500 breadth", "card-global_equities": "Global equities", "card-macro": "Rates", "card-commodities": "Commodities", "card-kalshi": "Fed odds", "card-kalshi-december_hikes": "December hikes", "regime-card": "Regime", "watchlist-card": "Watchlist", "card-screener": "Screener", "card-china-futures": "Futures vs Index", "card-china-etfs": "China ETFs / LOFs", "card-config": "Configuration" };
+  const NAV_LABELS = { "card-vix": "VIX", "card-skew": "SKEW", "card-fg": "Fear & Greed", "card-volcomplex": "Vol complex", "card-stocks": "Stocks", "card-comparisons": "Comparisons", "card-breadth": "S&P 500 breadth", "card-global_equities": "Global equities", "card-macro": "Rates", "card-commodities": "Commodities", "card-kalshi": "Fed odds", "card-kalshi-december_hikes": "December hikes", "regime-card": "Regime", "watchlist-card": "Watchlist", "card-screener": "Screener", "card-china-futures": "Futures vs Index", "card-china-etfs": "China ETFs / LOFs", "card-config": "Configuration", "card-futures_basis": "Futures basis", "card-inflation": "Inflation", "card-labor": "Labor", "card-pmi": "PMI", "card-nowcasts": "Nowcasts", "card-housing": "Housing", "card-consumer": "Consumer", "card-sentiment": "Sentiment", "card-financial_conditions": "Financial conditions", "card-japan_yields": "Japan yields", "card-japan_fx": "Japan FX", "card-us_jp_gaps": "US-Japan gaps" };
 
   function initNav() {
     updateNavForTab(state.activeTab);

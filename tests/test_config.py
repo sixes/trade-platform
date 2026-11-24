@@ -25,6 +25,11 @@ def credentials():
     return {name: os.environ.get(name) for name in CREDENTIALS}
 
 
+def startup_env(env):
+    # pytest injects PYTEST_CURRENT_TEST after fixtures replace os.environ; it is not startup config.
+    return {name: value for name, value in env.items() if not name.startswith("PYTEST_")}
+
+
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -37,7 +42,7 @@ def sandbox(tmp_path, monkeypatch):
     dotenv_calls = []
 
     def fake_load_dotenv(path, *, override):
-        dotenv_calls.append((path, override, dict(os.environ)))
+        dotenv_calls.append((path, override, startup_env(os.environ)))
         for name, value in DOTENV_VALUES.items():
             if override or name not in os.environ:
                 os.environ[name] = value
@@ -90,7 +95,7 @@ def test_absent_canonical_group_preserves_fallback(sandbox, existing, text):
     config = sandbox.load_config()
 
     expected = STALE_VALUES if existing else DOTENV_VALUES
-    assert sandbox.dotenv_calls == [(config.PROJECT_ROOT / ".env", False, before)]
+    assert sandbox.dotenv_calls == [(config.PROJECT_ROOT / ".env", False, startup_env(before))]
     assert dict(os.environ) == {**before, **expected}
     after = dict(os.environ)
     assert config.load_longport_profile(sandbox.profile) is None
@@ -244,7 +249,7 @@ def test_aliases_and_non_export_assignments_are_ignored(sandbox, existing):
 
     config = sandbox.load_config()
 
-    assert sandbox.dotenv_calls == [(config.PROJECT_ROOT / ".env", False, before)]
+    assert sandbox.dotenv_calls == [(config.PROJECT_ROOT / ".env", False, startup_env(before))]
     assert dict(os.environ) == {**before, **(STALE_VALUES if existing else DOTENV_VALUES)}
 
 
