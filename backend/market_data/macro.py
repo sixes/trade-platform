@@ -7,10 +7,14 @@ polling every minute costs one upstream request per series.
 from __future__ import annotations
 
 import calendar
+import csv
+import html
 import logging
 import math
+import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
@@ -20,12 +24,32 @@ import httpx
 
 from backend.analytics.indicators import percentile_rank
 from backend.config import Settings
-from backend.market_data.indices import BROWSER_HEADERS, BUILTIN_SOURCE_TYPES, IndexHistoryProvider
+from backend.market_data.fear_greed import CNN_URL as CNN_FEAR_GREED_URL, HEADERS as CNN_HEADERS
+from backend.market_data.indices import BROWSER_HEADERS, BUILTIN_SOURCE_TYPES, IndexHistoryProvider, transform_series
 from backend.market_data.sina import SinaClient, session_start
 
 log = logging.getLogger(__name__)
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={range}&interval={interval}&includePrePost=false"
+ISM_LIST_URL = "https://www.prnewswire.com/news/institute-for-supply-management/?page={page}"
+CLEVELAND_NOWCAST_URL = "https://www.clevelandfed.org/-/media/files/webcharts/inflationnowcasting/nowcast_year.json"
+ZILLOW_ZORI_URL = "https://files.zillowstatic.com/research/public_csvs/zori/National_zori_uc_sfrcondomfr_sm_month.csv"
+TRADINGVIEW_CALENDAR_URL = "https://economic-calendar.tradingview.com/events"
+AAII_SENTIMENT_URL = "https://www.aaii.com/sentimentsurvey"
+SHILLER_DATA_URL = "https://shillerdata.com/"
+CFTC_COT_URL = "https://publicreporting.cftc.gov/resource/6dca-aqww.json"
+REDBOOK_WINDOW_DAYS = 92
+MACRO_SLOW_TTL = 12 * 3600
+
+ISM_MONTHS = {name: index for index, name in enumerate(
+    ("January", "February", "March", "April", "May", "June", "July", "August",
+     "September", "October", "November", "December"), start=1)}
+CLEVELAND_SERIES = {
+    "CPI Inflation": "cpi_nowcast",
+    "Core CPI Inflation": "core_cpi_nowcast",
+    "PCE Inflation": "pce_nowcast",
+    "Core PCE Inflation": "core_pce_nowcast",
+}
 
 # range key -> intraday settings; anything else is a daily range measured in trading days.
 INTRADAY_RANGES = {
@@ -225,6 +249,163 @@ def stock_session(series: List[dict]) -> Optional[dict]:
         return None
 
 
+def parse_ism_releases(text: str, kind: str = "manufacturing") -> List[Tuple[str, float]]:
+    """ISM headline PMI values from a PR Newswire listing page: (first of release month, index)."""
+    label = "Services" if str(kind).lower() == "services" else "Manufacturing"
+    headline = re.compile(rf"\b{label} PMI\b[^0-9%]{{0,16}}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%")
+    period = re.compile(r"\b(" + "|".join(ISM_MONTHS) + r")\s+(20\d{2})\b")
+    out: Dict[str, float] = {}
+    for _, raw in re.findall(r'<a[^>]+href="(/news-releases/[^"]+)"[^>]*>(.*?)</a>', text, flags=re.S):
+        title = re.sub(r"<[^>]+>", " ", raw)
+        title = re.sub(r"\s+", " ", title)
+        if "Hospital PMI" in title:
+            continue
+        value = headline.search(title)
+        month = period.search(title)
+        if not value or not month:
+            continue
+        day = f"{month.group(2)}-{ISM_MONTHS[month.group(1)]:02d}-01"
+        out.setdefault(day, float(value.group(1)))
+    return sorted(out.items())
+
+
+def parse_cleveland_nowcasts(payload) -> Dict[str, List[Tuple[str, float]]]:
+    """Final Cleveland Fed nowcast per target month from the chart JSON, keyed by series kind."""
+    out: Dict[str, Dict[str, float]] = {name: {} for name in CLEVELAND_SERIES.values()}
+    for entry in payload or []:
+        match = re.match(r"(\d{4})-(\d{1,2})", str((entry.get("chart") or {}).get("subcaption") or ""))
+        if not match:
+            continue
+        day = f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-01"
+        for dataset in entry.get("dataset") or []:
+            key = CLEVELAND_SERIES.get(str(dataset.get("seriesname") or ""))
+            if not key:
+                continue
+            values = [float(point["value"]) for point in dataset.get("data") or []
+                      if str(point.get("value", "")).strip() not in ("", "None")]
+            if values:
+                out[key][day] = values[-1]
+    return {key: sorted(values.items()) for key, values in out.items()}
+
+
+def parse_zillow_rent(text: str) -> List[Tuple[str, float]]:
+    """National Zillow Observed Rent Index row: monthly median rent, dated the first of each month."""
+    rows = list(csv.reader(text.splitlines()))
+    if len(rows) < 2:
+        return []
+    header = rows[0]
+    dates = []
+    for column in header[4:]:
+        match = re.fullmatch(r"(\d{4})-(\d{2})-\d{2}", column.strip())
+        dates.append(f"{match.group(1)}-{match.group(2)}-01" if match else None)
+    target = next((row for row in rows[1:] if len(row) > 3 and row[2].strip() == "United States"), None)
+    if target is None:
+        return []
+    out = []
+    for day, raw in zip(dates, target[4:]):
+        if not day or str(raw).strip() in ("", "None"):
+            continue
+        out.append((day, float(raw)))
+    return out
+
+
+def parse_redbook_events(payload) -> List[Tuple[str, float]]:
+    """Johnson Redbook same-store sales YoY from TradingView calendar events, dated by reference week end."""
+    out: Dict[str, float] = {}
+    for event in (payload or {}).get("result") or []:
+        if "redbook" not in str(event.get("title") or "").lower():
+            continue
+        try:
+            actual = float(event.get("actual"))
+        except (TypeError, ValueError):
+            continue
+        stamp = str(event.get("referenceDate") or event.get("date") or "")[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", stamp):
+            continue
+        out.setdefault(stamp, actual)
+    return sorted(out.items())
+
+
+def parse_cnn_put_call(payload) -> List[Tuple[str, float]]:
+    """CNN's 5-day put/call ratio history from the fear-and-greed JSON."""
+    out: Dict[str, float] = {}
+    for point in ((payload or {}).get("put_call_options") or {}).get("data") or []:
+        try:
+            day = datetime.fromtimestamp(float(point["x"]) / 1000.0, tz=timezone.utc).date().isoformat()
+            value = float(point["y"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if value > 0:
+            out[day] = value
+    return sorted(out.items())
+
+
+def parse_aaii_sentiment(text: str) -> List[Tuple[str, float]]:
+    """AAII weekly bull-bear spread from the public page's recent-results table."""
+    start = text.find("Recent weekly results")
+    end = text.find("Historical view", start if start >= 0 else 0)
+    if start < 0 or end <= start:
+        return []
+    tokens = re.findall(r"\d{1,2}/\d{1,2}/\d{4}|\d{1,3}(?:\.\d+)?%", re.sub(r"<[^>]+>", " ", text[start:end]))
+    out: Dict[str, float] = {}
+    index = 0
+    while index < len(tokens):
+        if not re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", tokens[index]):
+            index += 1
+            continue
+        values = []
+        cursor = index + 1
+        while cursor < len(tokens) and len(values) < 3 and tokens[cursor].endswith("%"):
+            values.append(float(tokens[cursor][:-1]))
+            cursor += 1
+        if len(values) == 3 and all(0.0 <= value <= 100.0 for value in values) and 95.0 <= sum(values) <= 105.0:
+            try:
+                day = datetime.strptime(tokens[index], "%m/%d/%Y").date().isoformat()
+            except ValueError:
+                day = None
+            if day:
+                out[day] = values[0] - values[2]
+        index = cursor if cursor > index else index + 1
+    return sorted(out.items())
+
+
+def parse_cot_net(payload) -> List[Tuple[str, float]]:
+    """Weekly net non-commercial position (longs minus shorts) from a CFTC legacy COT response."""
+    out: Dict[str, float] = {}
+    for row in payload or []:
+        stamp = str(row.get("report_date_as_yyyy_mm_dd") or "")[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", stamp):
+            continue
+        try:
+            net = float(row["noncomm_positions_long_all"]) - float(row["noncomm_positions_short_all"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        out[stamp] = net
+    return sorted(out.items())
+
+
+def parse_shiller_cape(rows) -> List[Tuple[str, float]]:
+    """Monthly CAPE from Shiller's Data sheet rows (Date Fraction column, CAPE column)."""
+    out: Dict[str, float] = {}
+    for row in rows:
+        if len(row) <= 12:
+            continue
+        try:
+            fraction = float(row[5])
+            cape = float(row[12])
+        except (TypeError, ValueError):
+            continue
+        if not 1800.0 < fraction < 2200.0 or not 0.0 < cape < 200.0:
+            continue
+        year = int(fraction)
+        month = int(round((fraction - year) * 12.0)) + 1
+        if month > 12:
+            year += 1
+            month = 1
+        out[f"{year:04d}-{month:02d}-01"] = cape
+    return sorted(out.items())
+
+
 class MacroService:
     def __init__(self, settings: Settings, indices: IndexHistoryProvider, client=None, sina: Optional[SinaClient] = None):
         self.settings = settings
@@ -237,16 +418,237 @@ class MacroService:
         )
         self.timeout = 20.0
         self._live_cache: Dict[Tuple[str, str], Tuple[float, Optional[LiveData]]] = {}
+        self._slow_cache: Dict[Tuple[str, str], Tuple[float, object]] = {}
         self._lock = threading.Lock()
 
     def external_fetchers(self) -> Dict[str, Callable[[dict], List[Tuple[str, float]]]]:
         """Daily-history fetchers for source types beyond the plain HTTP CSV/JSON ones."""
         fetchers: Dict[str, Callable[[dict], List[Tuple[str, float]]]] = {
             "sina": lambda src: self.sina.daily(src["symbol"], float(src.get("scale", 1.0))),
+            "ism": self._ism_series,
+            "cleveland_nowcast": self._cleveland_series,
+            "zillow_zori": self._zillow_series,
+            "redbook": self._redbook_series,
+            "ratio": self._ratio_series,
+            "cnn_putcall": self._cnn_put_call_series,
+            "aaii": self._aaii_series,
+            "cot": self._cot_series,
+            "shiller_cape": self._shiller_cape_series,
         }
         if self.client is not None and self.settings.longbridge_credentials_present:
             fetchers["longbridge"] = lambda src: self.client.daily_closes(src["symbol"], 1000)
         return fetchers
+
+    def _slow(self, key: Tuple[str, str], fetch: Callable[[], object]):
+        with self._lock:
+            entry = self._slow_cache.get(key)
+            if entry and time.time() - entry[0] < MACRO_SLOW_TTL:
+                return entry[1]
+        value = fetch()
+        with self._lock:
+            self._slow_cache[key] = (time.time(), value)
+        return value
+
+    def _ism_series(self, src: dict) -> List[Tuple[str, float]]:
+        kind = str(src.get("kind", "manufacturing")).lower()
+        pages = max(1, min(int(src.get("pages", 14)), 30))
+
+        def fetch() -> List[Tuple[str, float]]:
+            merged: Dict[str, float] = {}
+            with httpx.Client(timeout=self.timeout, follow_redirects=True, headers=BROWSER_HEADERS) as http:
+                for page in range(1, pages + 1):
+                    try:
+                        resp = http.get(ISM_LIST_URL.format(page=page))
+                        resp.raise_for_status()
+                    except Exception as exc:
+                        log.warning("ISM listing page %d failed: %s", page, exc)
+                        break
+                    for day, value in parse_ism_releases(resp.text, kind):
+                        merged.setdefault(day, value)
+            if not merged:
+                raise RuntimeError(f"no ISM {kind} releases parsed")
+            log.info("ISM %s history: %d monthly values, last %s", kind, len(merged), max(merged))
+            return sorted(merged.items())
+
+        return self._slow(("ism", kind), fetch)
+
+    def _cleveland_series(self, src: dict) -> List[Tuple[str, float]]:
+        kind = str(src.get("kind", "cpi_nowcast")).lower()
+
+        def fetch() -> Dict[str, List[Tuple[str, float]]]:
+            with httpx.Client(timeout=max(self.timeout, 60.0), follow_redirects=True, headers=BROWSER_HEADERS) as http:
+                resp = http.get(CLEVELAND_NOWCAST_URL)
+                resp.raise_for_status()
+                return parse_cleveland_nowcasts(resp.json())
+
+        parsed = self._slow(("cleveland", "nowcasts"), fetch)
+        return parsed.get(kind, [])
+
+    def _zillow_series(self, src: dict) -> List[Tuple[str, float]]:
+        def fetch() -> List[Tuple[str, float]]:
+            with httpx.Client(timeout=self.timeout, follow_redirects=True, headers=BROWSER_HEADERS) as http:
+                resp = http.get(ZILLOW_ZORI_URL)
+                resp.raise_for_status()
+                return parse_zillow_rent(resp.text)
+
+        series = self._slow(("zillow", "zori_national"), fetch)
+        return transform_series(series, src.get("transform"), float(src.get("scale", 1.0)))
+
+    def _redbook_series(self, src: dict) -> List[Tuple[str, float]]:
+        years = max(1, min(int(src.get("years", 5)), 10))
+
+        def fetch() -> List[Tuple[str, float]]:
+            merged: Dict[str, float] = {}
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(days=365 * years + 62)
+            windows = []
+            cursor = start
+            while cursor < end:
+                following = min(cursor + timedelta(days=REDBOOK_WINDOW_DAYS), end)
+                windows.append((cursor, following))
+                cursor = following
+
+            def one(window) -> List[Tuple[str, float]]:
+                lo, hi = window
+                params = {"from": lo.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                          "to": hi.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "countries": "US"}
+                with httpx.Client(timeout=max(self.timeout, 45.0), follow_redirects=True,
+                                  headers={**BROWSER_HEADERS, "Origin": "https://www.tradingview.com",
+                                           "Referer": "https://www.tradingview.com/"}) as http:
+                    resp = http.get(TRADINGVIEW_CALENDAR_URL, params=params)
+                    resp.raise_for_status()
+                    return parse_redbook_events(resp.json())
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for chunk in pool.map(one, windows):
+                    merged.update(dict(chunk))
+            if not merged:
+                raise RuntimeError("no Redbook events parsed")
+            log.info("Redbook history: %d weekly values, last %s", len(merged), max(merged))
+            return sorted(merged.items())
+
+        return self._slow(("redbook", str(years)), fetch)
+
+    def _ratio_series(self, src: dict) -> List[Tuple[str, float]]:
+        numerator = src.get("numerator") or {}
+        denominator = src.get("denominator") or {}
+        if not numerator or not denominator:
+            raise RuntimeError("ratio source needs numerator and denominator")
+        ident = lambda part: str(part.get("symbol") or part.get("name") or part.get("id") or "")
+        key = f"ratio:{ident(numerator)}/{ident(denominator)}"
+        safe = re.sub(r"[^a-z0-9_.-]+", "_", key.lower())
+        top = self.indices.series(safe + "_num", [numerator])
+        bottom = dict(self.indices.series(safe + "_den", [denominator]))
+        series = [(day, value / bottom[day]) for day, value in top if bottom.get(day)]
+        if not series:
+            raise RuntimeError(f"no overlapping dates for {key}")
+        log.info("Ratio %s: %d daily values, last %s", key, len(series), series[-1][0])
+        return transform_series(series, src.get("transform"), float(src.get("scale", 1.0)))
+
+    def _cnn_put_call_series(self, src: dict) -> List[Tuple[str, float]]:
+        def fetch() -> List[Tuple[str, float]]:
+            with httpx.Client(timeout=self.timeout, follow_redirects=True, headers=CNN_HEADERS) as http:
+                resp = http.get(CNN_FEAR_GREED_URL)
+                resp.raise_for_status()
+                series = parse_cnn_put_call(resp.json())
+            if not series:
+                raise RuntimeError("no CNN put/call history parsed")
+            log.info("CNN put/call: %d daily values, last %s", len(series), series[-1][0])
+            return series
+
+        return self._slow(("cnn", "put_call"), fetch)
+
+    def _aaii_series(self, src: dict) -> List[Tuple[str, float]]:
+        """Weekly spread accumulated locally: AAII only exposes four recent weeks publicly."""
+        path = self.settings.data_dir / "aaii_sentiment.csv"
+
+        def fetch() -> List[Tuple[str, float]]:
+            rows: Dict[str, float] = {}
+            if path.exists():
+                with path.open(newline="", encoding="utf-8") as handle:
+                    for row in csv.DictReader(handle):
+                        try:
+                            rows[row["date"]] = float(row["spread"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+            fresh: List[Tuple[str, float]] = []
+            try:
+                with httpx.Client(timeout=self.timeout, follow_redirects=True, headers=BROWSER_HEADERS) as http:
+                    resp = http.get(AAII_SENTIMENT_URL)
+                    resp.raise_for_status()
+                    fresh = parse_aaii_sentiment(resp.text)
+            except Exception as exc:
+                if not rows:
+                    raise
+                log.warning("AAII sentiment refresh failed, using local history: %s", exc)
+            if fresh:
+                changed = any(rows.get(day) != value for day, value in fresh)
+                rows.update(dict(fresh))
+                if changed:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = path.with_suffix(".tmp")
+                    with tmp.open("w", newline="", encoding="utf-8") as handle:
+                        writer = csv.writer(handle)
+                        writer.writerow(["date", "spread"])
+                        for day in sorted(rows):
+                            writer.writerow([day, rows[day]])
+                    tmp.replace(path)
+                    log.info("AAII sentiment: %d weekly values, last %s", len(rows), max(rows))
+            if not rows:
+                raise RuntimeError("no AAII sentiment parsed")
+            return sorted(rows.items())
+
+        return self._slow(("aaii", "spread"), fetch)
+
+    def _cot_series(self, src: dict) -> List[Tuple[str, float]]:
+        code = str(src.get("code", "")).strip()
+        if not code:
+            raise RuntimeError("COT source needs a contract code")
+
+        def fetch() -> List[Tuple[str, float]]:
+            params = {
+                "$where": f"cftc_contract_market_code='{code}'",
+                "$select": "report_date_as_yyyy_mm_dd,noncomm_positions_long_all,noncomm_positions_short_all",
+                "$order": "report_date_as_yyyy_mm_dd ASC",
+                "$limit": "5000",
+            }
+            with httpx.Client(timeout=self.timeout, follow_redirects=True, headers=BROWSER_HEADERS) as http:
+                resp = http.get(CFTC_COT_URL, params=params)
+                resp.raise_for_status()
+                series = parse_cot_net(resp.json())
+            if not series:
+                raise RuntimeError(f"no COT rows for {code}")
+            log.info("COT %s: %d weekly values, last %s", code, len(series), series[-1][0])
+            return transform_series(series, src.get("transform"), float(src.get("scale", 1.0)))
+
+        return self._slow(("cot", code), fetch)
+
+    def _shiller_cape_series(self, src: dict) -> List[Tuple[str, float]]:
+        def fetch() -> List[Tuple[str, float]]:
+            import xlrd
+
+            with httpx.Client(timeout=max(self.timeout, 60.0), follow_redirects=True, headers=BROWSER_HEADERS) as http:
+                page = http.get(SHILLER_DATA_URL)
+                page.raise_for_status()
+                match = re.search(r'href="([^"]*ie_data\.xls[^"]*)"', page.text, re.I)
+                if not match:
+                    raise RuntimeError("Shiller ie_data.xls link not found")
+                url = html.unescape(match.group(1))
+                if url.startswith("//"):
+                    url = "https:" + url
+                elif url.startswith("/"):
+                    url = "https://shillerdata.com" + url
+                resp = http.get(url)
+                resp.raise_for_status()
+            book = xlrd.open_workbook(file_contents=resp.content)
+            sheet = book.sheet_by_name("Data")
+            series = parse_shiller_cape([sheet.row_values(index) for index in range(sheet.nrows)])
+            if not series:
+                raise RuntimeError("no CAPE values parsed")
+            log.info("Shiller CAPE: %d monthly values, last %s", len(series), series[-1][0])
+            return series
+
+        return self._slow(("shiller", "cape"), fetch)
 
     # ------------------------------------------------------------------ public
     def sections(self) -> List[dict]:

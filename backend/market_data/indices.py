@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import csv
 import io
 import logging
@@ -100,6 +101,37 @@ def parse_csv_series(text: str, value_column: Optional[str] = None) -> Series:
     return out
 
 
+def _minus_years(day: str, years: int) -> str:
+    year, month, date_ = (int(part) for part in day.split("-"))
+    year -= years
+    if month == 2 and date_ == 29 and not calendar.isleap(year):
+        date_ = 28
+    return f"{year:04d}-{month:02d}-{date_:02d}"
+
+
+def transform_series(series: Series, transform: Optional[str] = None, scale: float = 1.0) -> Series:
+    """Derived views of an ascending series: year-over-year, change, or percent change."""
+    name = (transform or "").strip().lower()
+    if name in ("", "level", "none"):
+        out = list(series)
+    elif name == "chg":
+        out = [(day, value - prev) for (_, prev), (day, value) in zip(series, series[1:])]
+    elif name == "pct":
+        out = [(day, (value / prev - 1.0) * 100.0) for (_, prev), (day, value) in zip(series, series[1:]) if prev]
+    elif name == "yoy":
+        by_day = dict(series)
+        out = []
+        for day, value in series:
+            prior = by_day.get(_minus_years(day, 1))
+            if prior:
+                out.append((day, (value / prior - 1.0) * 100.0))
+    else:
+        raise ValueError(f"unknown transform {transform!r}")
+    if scale != 1.0:
+        out = [(day, value * scale) for day, value in out]
+    return out
+
+
 def parse_mof_jgb(text: str, tenor: str = "30Y") -> Series:
     """Parse a Japan MOF JGB yield CSV: a title row, then `Date,1Y,...,40Y` with YYYY/M/D dates and '-' for gaps."""
     lines = text.splitlines()
@@ -131,7 +163,8 @@ class IndexHistoryProvider:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.ttl = ttl_minutes * 60
         self.timeout = timeout
-        self._lock = threading.Lock()
+        # Reentrant: derived sources (e.g. ratio) call series() again while a fetch is in flight.
+        self._lock = threading.RLock()
         self._memory: dict = {}
         self.source_used: dict = {}
 
@@ -176,10 +209,17 @@ class IndexHistoryProvider:
             kind = str(src.get("type", "")).lower()
             label = src.get("label") or kind.upper()
             if kind == "fred":
-                fetchers.append((f"{label}:{src['id']}", lambda s=src: self._download(FRED_URL.format(series_id=s["id"]), s["id"])))
+                fetchers.append((f"{label}:{src['id']}", lambda s=src: transform_series(
+                    self._download(FRED_URL.format(series_id=s["id"]), s["id"]),
+                    s.get("transform"), float(s.get("scale", 1.0)))))
             elif kind == "yahoo":
-                fetchers.append((f"{label}:{src['symbol']}", lambda s=src: self._download_yahoo(
-                    s["symbol"], s.get("range", "5y"), **({"timezone_name": s["timezone"]} if s.get("timezone") else {})
+                options = {}
+                if src.get("timezone"):
+                    options["timezone_name"] = src["timezone"]
+                if src.get("adjusted"):
+                    options["adjusted"] = True
+                fetchers.append((f"{label}:{src['symbol']}", lambda s=src, extra=options: self._download_yahoo(
+                    s["symbol"], s.get("range", "5y"), **extra
                 )))
             elif kind == "cboe":
                 fetchers.append((f"{label}:{src['name']}", lambda s=src: self._download(CBOE_HISTORY_URL.format(name=s["name"].upper()), s["name"])))
@@ -259,11 +299,12 @@ class IndexHistoryProvider:
             resp.raise_for_status()
             return parse_csv_series(resp.text, column)
 
-    def _download_yahoo(self, symbol: str, range_: str = "5y", *, timezone_name: Optional[str] = None) -> Series:
+    def _download_yahoo(self, symbol: str, range_: str = "5y", *, timezone_name: Optional[str] = None,
+                        adjusted: bool = False) -> Series:
         with httpx.Client(timeout=self.timeout, follow_redirects=True, headers=BROWSER_HEADERS) as client:
             resp = client.get(YAHOO_CHART_URL.format(symbol=symbol, range=range_))
             resp.raise_for_status()
-            return parse_yahoo_chart(resp.json(), timezone_name=timezone_name)
+            return parse_yahoo_chart(resp.json(), timezone_name=timezone_name, adjusted=adjusted)
 
     def _download_mof_jgb(self, tenor: str) -> Series:
         merged: Dict[str, float] = {}
@@ -302,13 +343,16 @@ class IndexHistoryProvider:
             path.with_suffix(".src").write_text(source, encoding="utf-8")
 
 
-def parse_yahoo_chart(payload: dict, *, timezone_name: Optional[str] = None) -> Series:
+def parse_yahoo_chart(payload: dict, *, timezone_name: Optional[str] = None, adjusted: bool = False) -> Series:
     result = (payload.get("chart") or {}).get("result") or []
     if not result:
         raise ValueError(f"yahoo chart error: {(payload.get('chart') or {}).get('error')}")
     node = result[0]
     stamps = node.get("timestamp") or []
-    closes = ((node.get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+    indicators = node.get("indicators") or {}
+    closes = ((indicators.get("quote") or [{}])[0].get("close") or [])
+    if adjusted:
+        closes = ((indicators.get("adjclose") or [{}])[0].get("adjclose") or []) or closes
     tz = ZoneInfo(timezone_name) if timezone_name else timezone.utc
     out: Series = []
     for stamp, close in zip(stamps, closes):

@@ -234,6 +234,7 @@ def test_live_sections_are_declared_and_commodities_snapshot_works(monkeypatch):
     service = offline_macro(monkeypatch)
     sections = {s["id"]: s for s in service.sections()}
     assert list(sections) == ["vix", "stocks", "comparisons", "futures_basis", "global_equities", "macro",
+                              "inflation", "labor", "pmi", "nowcasts", "housing", "consumer", "sentiment",
                               "financial_conditions", "japan_yields", "japan_fx", "us_jp_gaps", "commodities"]
     assert sections["vix"]["hidden"] is True and sections["macro"]["hidden"] is False
     assert sections["macro"]["curve"] is True and sections["japan_yields"]["curve"] is False
@@ -264,7 +265,7 @@ def test_global_equities_are_fixed_yahoo_indices_with_scoped_timezones(monkeypat
         assert spec["label"] == label and spec["unit"] == "index" and spec["timezone"] == tz
         assert spec["sources"] == spec["live"] == [{"type": "yahoo", "symbol": symbol, "timezone": tz}]
     for other in service.sections():
-        if other["id"] != "global_equities":
+        if other["id"] not in ("global_equities", "comparisons"):
             for spec in service.specs(other["id"]):
                 assert "timezone" not in spec
                 assert all("timezone" not in src for src in spec.get("sources", []) + spec.get("live", []))
@@ -1343,3 +1344,21 @@ def test_stock_primary_quote_missing_time_is_not_borrowed_from_chart_or_daily(mo
         "kind": "previous_close", "value": 50, "session_date": "2026-09-25", "timezone": "America/New_York",
     }
     assert entry["series"] == [{"t": "2026-09-25T10:00:00-04:00", "v": 192}]
+
+
+def test_nested_provider_fetch_does_not_deadlock(tmp_path, monkeypatch):
+    # A derived source (e.g. ratio) calls provider.series() while its own fetch holds the cache lock.
+    import threading
+
+    provider = IndexHistoryProvider(tmp_path, ttl_minutes=60)
+    monkeypatch.setattr(provider, "_download", lambda url, column: [("2026-01-02", 2.0)])
+
+    def nested(src):
+        return provider.series("ratio_num", [{"type": "fred", "id": "A"}])
+
+    result = []
+    worker = threading.Thread(target=lambda: result.append(provider.series("ratio", [{"type": "ratio"}], {"ratio": nested})))
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert result == [[("2026-01-02", 2.0)]]

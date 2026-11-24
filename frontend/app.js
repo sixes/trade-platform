@@ -117,16 +117,18 @@
   }
 
   // Unit-aware formatting for the mini cards: yields in % with bp changes, ETF prices in $, indices plain.
-  const fmtValue = (v, unit) => (v == null ? "-" : unit === "pct" ? `${num(v, 2)}%` : unit === "bp" ? `${num(v, 0)} bp` : unit === "usd" ? `$${num(v, 2)}` : unit === "jpy" ? `¥${num(v, 0)}` : num(v, unit === "fx" ? 3 : 2));
-  const fmtPrecise = (v, unit) => (v == null ? "-" : unit === "pct" ? `${num(v, 3)}%` : unit === "bp" ? `${num(v, 1)} bp` : unit === "usd" ? `$${num(v, 2)}` : unit === "jpy" ? `¥${num(v, 1)}` : unit === "vol" ? num(v, 2) : num(v, 3));
+  const fmtValue = (v, unit) => (v == null ? "-" : unit === "pct" ? `${num(v, 2)}%` : unit === "pp" ? `${num(v, 1)} pp` : unit === "bp" ? `${num(v, 0)} bp` : unit === "usd" ? `$${num(v, 2)}` : unit === "jpy" ? `¥${num(v, 0)}` : unit === "k" ? `${num(v, 0)}K` : num(v, unit === "fx" ? 3 : 2));
+  const fmtPrecise = (v, unit) => (v == null ? "-" : unit === "pct" ? `${num(v, 3)}%` : unit === "pp" ? `${num(v, 2)} pp` : unit === "bp" ? `${num(v, 1)} bp` : unit === "usd" ? `$${num(v, 2)}` : unit === "jpy" ? `¥${num(v, 1)}` : unit === "k" ? `${num(v, 1)}K` : unit === "vol" ? num(v, 2) : num(v, 3));
   const fmtChange = (chg, unit, base) => {
     if (chg == null) return "-";
     if (unit === "pct") return `${signed(chg * 100, 0)} bp`;
+    if (unit === "pp") return `${signed(chg, 1)} pp`;
     if (unit === "bp") return `${signed(chg, 1)} bp`;
+    if (unit === "k") return `${signed(chg, 0)}K`;
     if (unit === "usd" || unit === "jpy") return `${signed(chg, unit === "jpy" ? 0 : 2)}${base ? ` (${signed((chg / (base - chg)) * 100, 2)}%)` : ""}`;
-    return signed(chg, unit === "fx" ? 3 : 2);
+    return signed(chg, unit === "ratio" ? 3 : unit === "fx" ? 3 : 2);
   };
-  const fmtRange = (lo, hi, unit) => (lo == null || hi == null ? "-" : unit === "pct" ? `${num(lo, 2)}-${num(hi, 2)}%` : unit === "bp" ? `${num(lo, 0)} - ${num(hi, 0)} bp` : unit === "jpy" ? `¥${num(lo, 0)} - ¥${num(hi, 0)}` : `${num(lo, unit === "usd" ? 2 : unit === "fx" ? 3 : 1)} - ${num(hi, unit === "usd" ? 2 : unit === "fx" ? 3 : 1)}`);
+  const fmtRange = (lo, hi, unit) => (lo == null || hi == null ? "-" : unit === "pct" ? `${num(lo, 2)}-${num(hi, 2)}%` : unit === "bp" ? `${num(lo, 0)} - ${num(hi, 0)} bp` : unit === "jpy" ? `¥${num(lo, 0)} - ¥${num(hi, 0)}` : unit === "k" ? `${num(lo, 0)} - ${num(hi, 0)}K` : `${num(lo, unit === "usd" ? 2 : unit === "fx" ? 3 : 1)} - ${num(hi, unit === "usd" ? 2 : unit === "fx" ? 3 : 1)}`);
 
   function renderMiniRow(containerId, entries, defaultUnit) {
     const container = document.getElementById(containerId);
@@ -220,10 +222,13 @@
       };
       if (ctl.groups.length) {
         node.classList.add(hasSeries ? "mixed-groups" : "comparison-section");
-        if (!hasSeries) {
+        if (section.daily_only) {
+          // Daily-only sections chart calendar windows, so hide the intraday buttons they cannot serve.
           node.querySelector(".range-buttons").innerHTML = ctl.ranges.map((range) => `<button data-range="${esc(range)}">${esc(range.toUpperCase())}</button>`).join("");
-          const breadth = document.getElementById("card-breadth");
-          if (breadth) node.after(breadth);
+          if (!hasSeries && section.id === "comparisons") {
+            const breadth = document.getElementById("card-breadth");
+            if (breadth) node.after(breadth);
+          }
         }
       }
       try { ctl.variants = JSON.parse(localStorage.getItem(ctl.variantsKey) || "{}"); } catch (e) { ctl.variants = {}; }
@@ -493,6 +498,12 @@
     const chartKey = `mixed:${ctl.id}:${group.id}`;
     clearSeriesChart(chartKey);
     const entries = group.series.map((name) => data.items?.[name] || {});
+    const levelMode = group.mode === "level";
+    const rateMode = group.mode === "rate_level";
+    const levelUnit = group.unit || entries.find((entry) => entry.unit)?.unit || "index";
+    const fmtLevel = (value) => fmtValue(value, levelUnit);
+    const fmtAxis = levelMode ? fmtLevel : rateMode ? (value) => `${num(value, 2)}%` : (value) => num(value, 2);
+    const yTitle = group.y_label || (levelMode ? "Level" : rateMode ? "Percent levels" : "Price (USD)");
     const values = entries.map((entry) => new Map((entry.error ? [] : entry.series || []).filter((point) =>
       point && typeof point.t === "string" && Number.isFinite(point.v)
     ).map((point) => [point.t, point.v])));
@@ -501,13 +512,13 @@
     card.querySelector(".comparison-sources").innerHTML = entries.map((entry, i) => {
       const metrics = entry.metrics || {};
       const isMissing = missing.includes(group.series[i]);
-      return `<div><b>${esc(entry.label || group.series[i])}</b>: ${isMissing ? "unavailable" : fmtValue(metrics.value, entry.unit)}${!isMissing && metrics.change != null ? ` · ${fmtChange(metrics.change, entry.unit, metrics.value)}` : ""}<br><span class="muted">${esc(entry.live_source || entry.daily_source || "source unavailable")} · as of ${esc(metrics.as_of || entry.daily_last_date || "unavailable")}</span></div>`;
+      return `<div><b>${esc(entry.label || group.series[i])}</b>: ${isMissing ? "unavailable" : fmtValue(metrics.value, entry.unit)}${!isMissing && metrics.change != null ? ` · ${fmtChange(metrics.change, levelMode ? levelUnit : entry.unit, metrics.value)}` : ""}<br><span class="muted">${esc(entry.live_source || entry.daily_source || "source unavailable")} · as of ${esc(metrics.as_of || entry.daily_last_date || "unavailable")}</span></div>`;
     }).join("");
     let error = data.error || (typeof Chart === "undefined" ? "Chart library unavailable" : "");
     if (!error && !labels.length) error = "No observations returned";
     if (!error && missing.length === group.series.length) error = "All series unavailable";
     card.querySelector(".comparison-message").textContent = error ? `Overlay unavailable · ${error}`
-      : `Price overlay (USD)${missing.length ? ` · Missing series: ${missing.join(", ")}` : ""}`;
+      : `${yTitle}${missing.length ? ` · Missing series: ${missing.join(", ")}` : ""}`;
     if (error) return;
     const colors = ["#38bdf8", "#f5a524", "#a78bfa", "#5eead4", "#5eead4"];
     const datasets = group.series.map((name, i) => ({
@@ -532,10 +543,10 @@
         interaction: {mode: "index", intersect: false},
         plugins: {
           legend: {display: true, position: "bottom", labels: {color: "#e6edf3", boxWidth: 20, boxHeight: 0, font: {size: 11}}},
-          crosshair: {format: (value) => num(value, 2)},
+          crosshair: {format: (value) => fmtAxis(value)},
           tooltip: {callbacks: {
             title: (items) => items[0]?.label || "",
-            label: (item) => `${item.dataset.label}: ${fmtPrecise(item.parsed.y, entries[item.datasetIndex].unit)}`,
+            label: (item) => `${item.dataset.label}: ${levelMode || rateMode ? fmtAxis(item.parsed.y) : fmtPrecise(item.parsed.y, entries[item.datasetIndex].unit)}`,
             afterBody: (items) => {
               const stamp = items[0]?.label;
               return group.series.filter((_, i) => !Number.isFinite(values[i].get(stamp))).map((name) => `${name}: no observation`);
@@ -545,7 +556,7 @@
         scales: {
           x: {ticks: {color: "#8b98a8", maxTicksLimit: (context) => context.chart.width < 400 ? 2 : 5, maxRotation: 0, font: {size: 10},
             callback: (value, index) => { const label = labels[index]; return label ? (intraday ? label.slice(11, 16) : label) : ""; }}, grid: {color: "#263241"}},
-          y: {title: {display: true, text: "Price (USD)", color: "#8b98a8"}, ticks: {color: "#8b98a8", maxTicksLimit: 6, callback: (value) => num(value, 2)}, grid: {color: "#263241"}},
+          y: {title: {display: true, text: yTitle, color: "#8b98a8"}, ticks: {color: "#8b98a8", maxTicksLimit: 6, callback: (value) => fmtAxis(value)}, grid: {color: "#263241"}},
         },
       },
     });
@@ -560,7 +571,7 @@
           <div class="comparison-message muted small" role="status"></div>
           <div class="macro-chart"><canvas id="comparison-${domKey(ctl.id)}-${domKey(group.id)}"></canvas></div>
           <div class="comparison-sources small"></div>
-          <p class="comparison-note muted small">${esc(group.note || "")} Gaps indicate no observation; no interpolation.</p>
+          <p class="comparison-note muted small">${esc(group.note || "")} ${group.mode === "dual_axis" ? "Quarterly points are connected across months with no new observation." : "Gaps indicate no observation; no interpolation."}</p>
         </div>`).join("");
       container.dataset.built = "true";
     }
@@ -570,6 +581,20 @@
       clearSeriesChart(chartKey);
       const priceChange = group.mode === "price_change";
       const entries = group.series.map((name) => data.items?.[name] || {});
+      const levelMode = group.mode === "level";
+      const dualMode = group.mode === "dual_axis";
+      const rightNames = new Set(dualMode ? (group.right_series || []) : []);
+      const onRight = (i) => rightNames.has(group.series[i]);
+      const levelUnit = group.unit || entries.find((entry) => entry.unit)?.unit || "index";
+      const fmtLevel = (value) => fmtValue(value, levelUnit);
+      const leftUnit = group.left_unit || entries.find((entry, i) => !onRight(i))?.unit || "index";
+      const rightUnit = group.right_unit || entries.find((entry, i) => onRight(i))?.unit || "index";
+      const money = (value, unit) => unit === "usd"
+        ? `${Number(value) < 0 ? "-" : ""}$${Math.abs(Number(value)).toLocaleString("en-US", {maximumFractionDigits: Math.abs(Number(value)) < 100 ? 2 : 0})}`
+        : fmtValue(value, unit);
+      const moneyChange = (change, unit, base) => unit === "usd"
+        ? `${Number(change) < 0 ? "-" : "+"}$${Math.abs(Number(change)).toLocaleString("en-US", {maximumFractionDigits: Math.abs(Number(change)) < 100 ? 2 : 0})}${base ? ` (${signed((change / (base - change)) * 100, 2)}%)` : ""}`
+        : fmtChange(change, unit, base);
       const values = entries.map((entry) => new Map((entry.error ? [] : entry.series || []).filter((point) =>
         point && typeof point.t === "string" && /^\d{4}-\d{2}-\d{2}$/.test(point.t)
       ).map((point) => [point.t, Number.isFinite(point.v) && (!priceChange || point.v > 0) ? point.v : null])));
@@ -582,14 +607,18 @@
         const isMissing = missing.includes(group.series[i]);
         const lastPrice = priceChange ? [...values[i]].filter(([, value]) => Number.isFinite(value)).at(-1) : null;
         const observation = lastPrice?.[0] || metrics.as_of || entry.daily_last_date || metrics.daily_last_date;
-        return `<div><b>${esc(entry.label || group.series[i])}</b>: ${isMissing ? "unavailable" : fmtValue(priceChange ? lastPrice?.[1] : metrics.value, entry.unit)}${!priceChange && !isMissing && metrics.change != null ? ` · ${fmtChange(metrics.change, "pct")} vs previous observation` : ""}<br><span class="muted">${esc(entry.daily_source || "source unavailable")} · as of ${esc(observation || "unavailable")}</span></div>`;
+        const sourceValue = priceChange ? lastPrice?.[1] : metrics.value;
+        const changeText = !priceChange && !isMissing && metrics.change != null
+          ? ` · ${dualMode ? moneyChange(metrics.change, entry.unit || (onRight(i) ? rightUnit : leftUnit), metrics.value) : fmtChange(metrics.change, levelMode ? levelUnit : "pct")} vs previous observation`
+          : "";
+        return `<div><b>${esc(entry.label || group.series[i])}</b>: ${isMissing ? "unavailable" : dualMode ? money(sourceValue, entry.unit || (onRight(i) ? rightUnit : leftUnit)) : fmtValue(sourceValue, entry.unit)}${changeText}<br><span class="muted">${esc(entry.daily_source || "source unavailable")} · as of ${esc(observation || "unavailable")}</span></div>`;
       }).join("");
       let error = data.error || (typeof Chart === "undefined" ? "Chart library unavailable" : "");
       if (!error && priceChange && (missing.length || !baseline)) error = missing.length ? `Missing series: ${missing.join(", ")}` : "No common date with valid positive prices";
       if (!error && missing.length === group.series.length) error = "All series unavailable";
       card.querySelector(".comparison-message").textContent = error ? `Comparison unavailable · ${error}` : priceChange
         ? `Price change (%) · shared baseline ${baseline}`
-        : `Yield / policy rate (%)${missing.length ? ` · Missing series: ${missing.join(", ")}` : ""}`;
+        : `${group.y_label || (dualMode ? "Levels" : levelMode ? "Level" : "Rate (%)")}${missing.length ? ` · Missing series: ${missing.join(", ")}` : ""}`;
       if (error) return;
       const bounds = group.target_bounds || [];
       const colors = ["#38bdf8", "#f5a524", "#a78bfa", "#5eead4", "#5eead4"];
@@ -606,10 +635,63 @@
           return Number.isFinite(points[index]) && !Number.isFinite(points[index - 1]) && !Number.isFinite(points[index + 1]) ? 3 : 0;
         },
         pointHitRadius: 10,
-        tension: 0, spanGaps: false, fill: false,
+        yAxisID: dualMode ? (onRight(i) ? "y1" : "y") : undefined,
+        tension: 0, spanGaps: dualMode, fill: false,
         stepped: bounds.includes(name) ? "before" : false,
         borderDash: name === bounds[0] ? [5, 4] : name === bounds[1] ? [2, 3] : [],
       }));
+      const smaWindow = priceChange ? 0 : Math.max(0, Number(group.sma) || 0);
+      if (smaWindow) {
+        const rollingMean = (data, window) => {
+          const out = new Array(data.length).fill(null);
+          let sum = 0, count = 0;
+          for (let i = 0; i < data.length; i++) {
+            if (Number.isFinite(data[i])) { sum += data[i]; count += 1; }
+            if (i >= window) {
+              if (Number.isFinite(data[i - window])) { sum -= data[i - window]; count -= 1; }
+            }
+            if (count === window) out[i] = sum / window;
+          }
+          return out;
+        };
+        datasets.slice(0, group.series.length).forEach((dataset) => {
+          datasets.push({
+            label: `${dataset.label} ${smaWindow}d avg`,
+            data: rollingMean(dataset.data, smaWindow),
+            borderColor: "rgba(230,237,243,0.55)", borderWidth: 1, borderDash: [4, 3],
+            pointRadius: 0, pointHitRadius: 0, fill: false, tension: 0, yAxisID: dataset.yAxisID,
+          });
+        });
+      }
+      const levels = (group.levels || []).filter((level) => level && Number.isFinite(Number(level.value)));
+      const levelLines = levels.length ? {
+        id: "sentimentLevels",
+        afterDatasetsDraw(chart) {
+          const {ctx, chartArea: area, scales} = chart;
+          const scale = scales.y;
+          if (!scale) return;
+          ctx.save();
+          ctx.font = "10px -apple-system, Segoe UI, Roboto, sans-serif";
+          ctx.textBaseline = "middle";
+          levels.forEach((level) => {
+            const y = scale.getPixelForValue(Number(level.value));
+            if (!Number.isFinite(y) || y < area.top || y > area.bottom) return;
+            ctx.strokeStyle = "rgba(245,165,36,0.6)";
+            ctx.setLineDash([5, 4]);
+            ctx.beginPath(); ctx.moveTo(area.left, y); ctx.lineTo(area.right, y); ctx.stroke();
+            ctx.setLineDash([]);
+            const text = `${level.label || "Level"} ${fmtLevel(Number(level.value))}`;
+            const width = ctx.measureText(text).width;
+            const boxX = Math.max(area.left, area.right - width - 8);
+            const boxY = Math.min(Math.max(y - 7, area.top), area.bottom - 14);
+            ctx.fillStyle = "rgba(15,20,25,0.82)";
+            ctx.fillRect(boxX - 2, boxY, width + 4, 14);
+            ctx.fillStyle = "#f5a524";
+            ctx.fillText(text, boxX, boxY + 7);
+          });
+          ctx.restore();
+        },
+      } : null;
       const band = {
         id: "targetBand",
         beforeDatasetsDraw(chart) {
@@ -628,25 +710,40 @@
           ctx.restore();
         },
       };
-      const yScale = {title: {display: true, text: priceChange ? "Price change (%)" : "Rate (%)", color: "#8b98a8"}, ticks: {color: "#8b98a8", maxTicksLimit: 6, callback: (value) => `${num(value, 2)}%`}, grid: {color: "#263241"}};
+      const yScale = {title: {display: true, text: priceChange ? "Price change (%)" : dualMode ? (group.left_label || "Left axis") : (group.y_label || (levelMode ? "Level" : "Rate (%)")), color: "#8b98a8"}, ticks: {color: "#8b98a8", maxTicksLimit: 6, callback: (value) => dualMode ? money(value, leftUnit) : levelMode ? fmtLevel(value) : `${num(value, 2)}%`}, grid: {color: "#263241"}};
+      const rightScale = dualMode ? {position: "right", title: {display: true, text: group.right_label || "Right axis", color: "#8b98a8"}, ticks: {color: "#8b98a8", maxTicksLimit: 6, callback: (value) => money(value, rightUnit)}, grid: {drawOnChartArea: false}} : null;
       if (priceChange) {
         const allVals = datasets.flatMap((ds) => ds.data.filter(Number.isFinite));
         const absMax = Math.max(1, ...allVals.map(Math.abs)) * 1.05;
         yScale.min = -absMax;
         yScale.max = absMax;
+      } else if (!dualMode && (group.levels || []).length) {
+        // Keep every threshold on-canvas; otherwise the lines that matter most (e.g. HY crisis at 8,
+        // CAPE long-run average at 20) silently fall outside an auto-scaled axis.
+        const values = datasets.flatMap((ds) => ds.data.filter(Number.isFinite))
+          .concat(group.levels.map((level) => Number(level.value)).filter(Number.isFinite));
+        const lo = Math.min(...values), hi = Math.max(...values);
+        const pad = (hi - lo) * 0.04 || Math.abs(hi || 1) * 0.02;
+        const raw = (hi - lo || Math.abs(hi || 1)) / 5;
+        const mag = 10 ** Math.floor(Math.log10(raw));
+        const norm = raw / mag;
+        const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+        yScale.min = Math.floor((lo - pad) / step) * step;
+        yScale.max = Math.ceil((hi + pad) / step) * step;
       }
       state.charts[chartKey] = new Chart(card.querySelector("canvas"), {
-        type: "line", plugins: [band, crosshairPlugin], data: {labels: dates, datasets},
+        type: "line", plugins: [band, crosshairPlugin, ...(levelLines ? [levelLines] : [])], data: {labels: dates, datasets},
         options: {
           animation: false, responsive: true, maintainAspectRatio: false,
           interaction: {mode: "index", intersect: false},
           plugins: {
             legend: {display: true, position: "bottom", labels: {color: "#e6edf3", boxWidth: 20, boxHeight: 0, font: {size: 11}}},
-            crosshair: {format: (value) => `${num(value, 2)}%`},
+            crosshair: {format: (value, scaleId) => dualMode ? money(value, scaleId === "y1" ? rightUnit : leftUnit) : levelMode ? fmtLevel(value) : `${num(value, 2)}%`},
             tooltip: {callbacks: {
               title: (items) => items[0]?.label || "",
-              label: (item) => `${item.dataset.label}: ${priceChange ? signed(item.parsed.y, 2) : num(item.parsed.y, 3)}%${priceChange ? ` (${fmtPrecise(values[item.datasetIndex].get(item.label), entries[item.datasetIndex].unit)})` : ""}`,
+              label: (item) => `${item.dataset.label}: ${priceChange ? `${signed(item.parsed.y, 2)}%` : dualMode ? money(item.parsed.y, entries[item.datasetIndex].unit || (onRight(item.datasetIndex) ? rightUnit : leftUnit)) : levelMode ? fmtLevel(item.parsed.y) : `${num(item.parsed.y, 3)}%`}${priceChange ? ` (${fmtPrecise(values[item.datasetIndex].get(item.label), entries[item.datasetIndex].unit)})` : ""}`,
               afterBody: (items) => {
+                if (dualMode) return [];
                 const day = items[0]?.label;
                 return group.series.filter((_, i) => !Number.isFinite(values[i].get(day))).map((name) => `${name}: no observation`);
               },
@@ -655,6 +752,7 @@
           scales: {
             x: {ticks: {color: "#8b98a8", maxTicksLimit: (context) => context.chart.width < 400 ? 2 : 5, maxRotation: 0, font: {size: 10}}, grid: {color: "#263241"}},
             y: yScale,
+            ...(rightScale ? {y1: rightScale} : {}),
           },
         },
       });
@@ -701,9 +799,10 @@
       const { ctx, chartArea: a } = chart;
       const active = chart.getActiveElements();
       const x = active.length ? active[0].element.x : c.x;
-      const yScale = chart.scales.y;
+      const axisId = active.length ? (chart.data.datasets[active[0].datasetIndex].yAxisID || "y") : "y";
+      const yScale = chart.scales[axisId] || chart.scales.y;
       const value = yScale.getValueForPixel(c.y);
-      const label = options && options.format ? options.format(value) : Number(value).toFixed(2);
+      const label = options && options.format ? options.format(value, yScale.id) : Number(value).toFixed(2);
 
       ctx.save();
       ctx.lineWidth = 1;

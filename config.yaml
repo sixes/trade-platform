@@ -374,6 +374,362 @@ live_sections:
         series: [VPC, BIZD]
         after: HYG
         note: "Private-credit and BDC income ETFs on a shared USD price axis; price lines exclude monthly distributions."
+  - id: inflation
+    title: Inflation
+    daily_only: true
+    default_range: 5y
+    ranges: [1y, 3y, 5y]
+    refresh_seconds: 3600
+    groups:
+      - id: inflation_yoy
+        title: Inflation, year over year
+        mode: rate_level
+        series: [CPI_YOY, CORE_CPI_YOY, CORE_PCE_YOY, PPI_YOY]
+        note: "CPI and PPI from BLS, PCE from BEA, all via FRED. PPI is final demand; core measures exclude food and energy. Monthly observations are published with a lag and are revised."
+    series:
+      - key: CPI_YOY
+        label: CPI YoY
+        unit: pct
+        sources: [{type: fred, id: CPIAUCSL, transform: yoy, label: "BLS CPI via FRED"}]
+      - key: CORE_CPI_YOY
+        label: Core CPI YoY
+        unit: pct
+        sources: [{type: fred, id: CPILFESL, transform: yoy, label: "BLS core CPI via FRED"}]
+      - key: CORE_PCE_YOY
+        label: Core PCE YoY (Fed's preferred measure)
+        unit: pct
+        sources: [{type: fred, id: PCEPILFE, transform: yoy, label: "BEA core PCE via FRED"}]
+      - key: PPI_YOY
+        label: PPI final demand YoY
+        unit: pct
+        sources: [{type: fred, id: PPIFIS, transform: yoy, label: "BLS PPI via FRED"}]
+      - key: STICKY_CORE_YOY
+        label: Sticky core services CPI YoY (Atlanta Fed)
+        unit: pct
+        note: "Sticky Price CPI less Food and Energy, already expressed as a year-over-year percent change."
+        sources: [{type: fred, id: CORESTICKM159SFRBATL, label: "Atlanta Fed sticky CPI via FRED"}]
+  - id: labor
+    title: Labor Demand
+    daily_only: true
+    default_range: 3y
+    ranges: [6m, 1y, 3y, 5y]
+    refresh_seconds: 3600
+    groups:
+      - id: payroll_change
+        title: Monthly payroll change
+        mode: level
+        unit: k
+        y_label: "Change (thousands)"
+        series: [ADP_CHG, PAYROLL_CHG]
+        note: "ADP National Employment Report (private) versus BLS total nonfarm payrolls. Both are first prints and are revised; the series are not benchmarked to each other."
+      - id: claims
+        title: Initial jobless claims
+        mode: level
+        unit: k
+        y_label: "Thousands of claims (SA)"
+        series: [ICSA_K, IC4WSA_K]
+        note: "Weekly and seasonally adjusted. The 4-week average smooths holiday and weather effects; continuing claims are on their own card because the scale differs."
+    series:
+      - key: ADP_CHG
+        label: ADP private payrolls, monthly change (thousands)
+        unit: k
+        sources: [{type: fred, id: ADPMNUSNERSA, transform: chg, scale: 0.001, label: "ADP via FRED"}]
+      - key: PAYROLL_CHG
+        label: BLS total nonfarm payrolls, monthly change (thousands)
+        unit: k
+        sources: [{type: fred, id: PAYEMS, transform: chg, label: "BLS via FRED"}]
+      - key: ICSA_K
+        label: Initial jobless claims (thousands)
+        unit: k
+        sources: [{type: fred, id: ICSA, scale: 0.001, label: "DOL via FRED"}]
+      - key: IC4WSA_K
+        label: Initial claims, 4-week average (thousands)
+        unit: k
+        sources: [{type: fred, id: IC4WSA, scale: 0.001, label: "DOL via FRED"}]
+      - key: CCSA_K
+        label: Continuing jobless claims (thousands)
+        unit: k
+        sources: [{type: fred, id: CCSA, scale: 0.001, label: "DOL via FRED"}]
+  - id: pmi
+    title: ISM PMI
+    daily_only: true
+    default_range: 5y
+    ranges: [1y, 3y, 5y]
+    refresh_seconds: 3600
+    groups:
+      - id: ism_levels
+        title: ISM Manufacturing vs Services
+        mode: level
+        unit: index
+        y_label: "Diffusion index (50 = neutral)"
+        series: [ISM_MFG, ISM_SVC]
+        note: "Monthly ISM Report on Business. S&P Global's flash PMI has no free historical feed, so the monthly ISM readings are shown; values above 50 indicate expansion."
+    series:
+      - key: ISM_MFG
+        label: ISM Manufacturing PMI
+        unit: index
+        sources: [{type: ism, kind: manufacturing, pages: 14, label: "ISM via PR Newswire"}]
+      - key: ISM_SVC
+        label: ISM Services PMI
+        unit: index
+        sources: [{type: ism, kind: services, pages: 14, label: "ISM via PR Newswire"}]
+  - id: nowcasts
+    title: Nowcasts
+    daily_only: true
+    default_range: 3y
+    ranges: [1y, 3y, 5y]
+    refresh_seconds: 1800
+    groups:
+      - id: cpi_nowcast
+        title: Cleveland Fed CPI nowcast vs actual
+        mode: rate_level
+        series: [CLE_CPI_NOW, CPI_YOY]
+        note: "Final nowcast for each month (the last vintage before the BLS release) against realized CPI YoY. The current month is a live nowcast."
+      - id: core_pce_nowcast
+        title: Cleveland Fed core PCE nowcast vs actual
+        mode: rate_level
+        series: [CLE_CORE_PCE_NOW, CORE_PCE_YOY]
+        note: "Final nowcast before the BEA release against realized core PCE YoY."
+    series:
+      - key: CLE_CPI_NOW
+        label: Cleveland Fed CPI nowcast (YoY)
+        unit: pct
+        sources: [{type: cleveland_nowcast, kind: cpi_nowcast, label: "Cleveland Fed"}]
+      - key: CLE_CORE_PCE_NOW
+        label: Cleveland Fed core PCE nowcast (YoY)
+        unit: pct
+        sources: [{type: cleveland_nowcast, kind: core_pce_nowcast, label: "Cleveland Fed"}]
+      - key: GDPNOW
+        label: Atlanta Fed GDPNow (quarterly, SAAR)
+        unit: pct
+        note: "Quarterly nowcast of real GDP growth at an annual rate, updated by the Atlanta Fed as new source data arrive."
+        sources: [{type: fred, id: GDPNOW, label: "Atlanta Fed via FRED"}]
+      - key: WEI
+        label: NY Fed Weekly Economic Index
+        unit: pct
+        note: "Real activity index scaled to four-quarter GDP growth; weekly and revised."
+        sources: [{type: fred, id: WEI, label: "NY Fed via FRED"}]
+      - key: CPI_YOY
+        label: CPI YoY (actual)
+        unit: pct
+        sources: [{type: fred, id: CPIAUCSL, transform: yoy, label: "BLS CPI via FRED"}]
+      - key: CORE_PCE_YOY
+        label: Core PCE YoY (actual)
+        unit: pct
+        sources: [{type: fred, id: PCEPILFE, transform: yoy, label: "BEA core PCE via FRED"}]
+  - id: housing
+    title: Housing
+    daily_only: true
+    default_range: 5y
+    ranges: [1y, 3y, 5y]
+    refresh_seconds: 3600
+    groups:
+      - id: mortgage_rates
+        title: Mortgage rates
+        mode: rate_level
+        y_label: "30Y / 15Y fixed (%)"
+        series: [MORTGAGE30, MORTGAGE15]
+        note: "Freddie Mac Primary Mortgage Market Survey, weekly. The 30-year fixed is the standard affordability reference; the 15-year usually trades lower."
+      - id: price_vs_rent
+        title: House price vs rent
+        mode: dual_axis
+        series: [MEDIAN_PRICE, RENT]
+        right_series: [MEDIAN_PRICE]
+        left_label: "Rent ($/month)"
+        right_label: "Median house price ($)"
+        left_unit: usd
+        right_unit: usd
+        y_label: "Rent (left) and median house price (right)"
+        note: "Census median sales price of houses sold (quarterly, right axis) versus the Zillow Observed Rent Index for the United States (monthly, left axis). Different universes, vintages and revision schedules."
+    series:
+      - key: MORTGAGE30
+        label: 30-year fixed mortgage rate
+        unit: pct
+        sources: [{type: fred, id: MORTGAGE30US, label: "Freddie Mac via FRED"}]
+      - key: MORTGAGE15
+        label: 15-year fixed mortgage rate
+        unit: pct
+        sources: [{type: fred, id: MORTGAGE15US, label: "Freddie Mac via FRED"}]
+      - key: MEDIAN_PRICE
+        label: Median house price
+        unit: usd
+        sources: [{type: fred, id: MSPUS, label: "Census via FRED"}]
+      - key: RENT
+        label: National rent (Zillow)
+        unit: usd
+        sources: [{type: zillow_zori, label: "Zillow ZORI"}]
+  - id: consumer
+    title: Consumer
+    daily_only: true
+    default_range: 1y
+    ranges: [6m, 1y, 3y, 5y]
+    refresh_seconds: 1800
+    groups:
+      - id: redbook_sales
+        title: Redbook same-store sales
+        mode: rate_level
+        y_label: "Same-store sales YoY (%)"
+        series: [REDBOOK_YOY]
+        note: "Johnson Redbook weekly year-over-year same-store sales for large general-merchandise retailers, published Tuesdays. History from TradingView's public economic calendar."
+      - id: gasoline
+        title: US regular gasoline price
+        mode: level
+        unit: usd
+        y_label: "Dollars per gallon"
+        series: [GASOLINE]
+        note: "EIA weekly retail price for regular all formulations, Monday survey; national average before taxes."
+    series:
+      - key: REDBOOK_YOY
+        label: Redbook same-store sales YoY
+        unit: pct
+        sources: [{type: redbook, years: 5, label: "Redbook via TradingView calendar"}]
+      - key: GASOLINE
+        label: US regular gasoline (per gallon)
+        unit: usd
+        sources: [{type: fred, id: GASREGW, label: "EIA via FRED"}]
+  - id: sentiment
+    title: Sentiment, Breadth & Valuation
+    daily_only: true
+    default_range: 5y
+    ranges: [1y, 3y, 5y]
+    refresh_seconds: 3600
+    groups:
+      - id: rsp_spy
+        title: Equal-weight vs cap-weight (RSP/SPY)
+        mode: level
+        unit: ratio
+        y_label: "RSP / SPY ratio"
+        series: [RSP_SPY]
+        sma: 200
+        note: "Total-return ratio of the equal-weight S&P 500 ETF to the cap-weighted ETF, with its 200-day average. Falling means mega-caps are leading; rising means breadth is improving."
+      - id: iwm_spy
+        title: Small caps vs large caps (IWM/SPY)
+        mode: level
+        unit: ratio
+        y_label: "IWM / SPY ratio"
+        series: [IWM_SPY]
+        sma: 200
+        note: "Total-return ratio of the Russell 2000 ETF to the S&P 500 ETF, with its 200-day average. Small caps usually lead in risk-on phases and lag in defensive ones."
+      - id: vix_term
+        title: VIX term structure (VIX / VIX3M)
+        mode: level
+        unit: ratio
+        y_label: "VIX / VIX3M"
+        series: [VIX_VIX3M]
+        levels:
+          - {value: 1.0, label: "Inverted - stress"}
+        note: "Front-month VIX relative to 3-month VIX. Above 1 the curve is inverted, the cleanest near-term risk-off signal in equity volatility."
+      - id: put_call
+        title: CBOE put/call ratio (5-day)
+        mode: level
+        unit: ratio
+        y_label: "Put / call"
+        series: [PUT_CALL]
+        levels:
+          - {value: 0.7, label: "Complacency"}
+          - {value: 1.0, label: "Fear"}
+        note: "CNN Business 5-day put/call ratio across Cboe equity, index and ETP options. Low readings mark complacency, spikes mark capitulation. About one year of history is available from this source."
+      - id: aaii
+        title: AAII bull-bear spread
+        mode: level
+        unit: pp
+        y_label: "Bullish minus bearish (pp)"
+        series: [AAII_SPREAD]
+        levels:
+          - {value: -10, label: "Pessimism"}
+          - {value: 30, label: "Complacency"}
+        note: "AAII individual-investor survey, weekly Thursday reading. AAII's free full-history download is bot-protected, so this series starts with the four weeks shown publicly and extends weekly."
+      - id: cot
+        title: CFTC net non-commercial positioning
+        mode: level
+        unit: k
+        y_label: "Net contracts (000s)"
+        series: [COT_SPX, COT_VIX]
+        levels:
+          - {value: 0, label: "Net flat"}
+        note: "CFTC Commitments of Traders, legacy futures-only, Tuesday positions. Net non-commercial length in thousands of contracts; crowded extremes often precede reversals."
+      - id: cape
+        title: Shiller CAPE
+        mode: level
+        unit: ratio
+        y_label: "Cyclically adjusted P/E (x)"
+        series: [CAPE]
+        levels:
+          - {value: 20, label: "Long-run average"}
+          - {value: 30, label: "Elevated"}
+          - {value: 40, label: "Extreme"}
+        note: "S&P 500 price divided by 10-year average real earnings, monthly from Shiller's data. The long-run average is about 17x; readings above 30x have historically been expensive."
+      - id: real_yield
+        title: 10-year TIPS real yield
+        mode: level
+        unit: pct
+        y_label: "Real yield (%)"
+        series: [TIPS10]
+        levels:
+          - {value: 0, label: "Zero real yield"}
+          - {value: 2, label: "Restrictive"}
+        note: "10-year Treasury inflation-protected yield, the real discount rate for equities. Positive real yields tighten conditions and pressure long-duration growth stocks."
+      - id: hy_oas
+        title: High-yield credit spread (OAS)
+        mode: level
+        unit: pct
+        y_label: "Option-adjusted spread (%)"
+        series: [HY_OAS]
+        levels:
+          - {value: 4, label: "Tight"}
+          - {value: 6, label: "Stress"}
+          - {value: 8, label: "Crisis"}
+        note: "ICE BofA US high-yield option-adjusted spread. Credit stress usually leads equity drawdowns; above 6% is stress, above 8% crisis."
+    series:
+      - key: RSP_SPY
+        label: RSP / SPY
+        unit: ratio
+        sources:
+          - {type: ratio, label: "Yahoo total return",
+             numerator: {type: yahoo, symbol: RSP, adjusted: true},
+             denominator: {type: yahoo, symbol: SPY, adjusted: true}}
+      - key: IWM_SPY
+        label: IWM / SPY
+        unit: ratio
+        sources:
+          - {type: ratio, label: "Yahoo total return",
+             numerator: {type: yahoo, symbol: IWM, adjusted: true},
+             denominator: {type: yahoo, symbol: SPY, adjusted: true}}
+      - key: VIX_VIX3M
+        label: VIX / VIX3M
+        unit: ratio
+        sources:
+          - {type: ratio, label: "Cboe",
+             numerator: {type: cboe, name: VIX},
+             denominator: {type: cboe, name: VIX3M}}
+      - key: PUT_CALL
+        label: 5-day put/call ratio
+        unit: ratio
+        sources: [{type: cnn_putcall, label: "CNN Fear & Greed"}]
+      - key: AAII_SPREAD
+        label: AAII bull-bear spread
+        unit: pp
+        sources: [{type: aaii, label: "AAII"}]
+      - key: COT_SPX
+        label: E-mini S&P 500 net non-commercial
+        unit: k
+        sources: [{type: cot, code: 13874A, scale: 0.001, label: "CFTC"}]
+      - key: COT_VIX
+        label: VIX futures net non-commercial
+        unit: k
+        sources: [{type: cot, code: 1170E1, scale: 0.001, label: "CFTC"}]
+      - key: CAPE
+        label: Shiller CAPE
+        unit: ratio
+        sources: [{type: shiller_cape, label: "Shiller"}]
+      - key: TIPS10
+        label: 10-year TIPS real yield
+        unit: pct
+        sources: [{type: fred, id: DFII10, label: "Treasury via FRED"}]
+      - key: HY_OAS
+        label: US high-yield option-adjusted spread
+        unit: pct
+        sources: [{type: fred, id: BAMLH0A0HYM2, label: "ICE BofA via FRED"}]
   - id: financial_conditions
     title: Financial Conditions
     daily_only: true

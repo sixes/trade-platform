@@ -165,6 +165,7 @@ def test_macro_endpoint_rejects_unknown_range_and_section():
     config = client.get("/api/config").json()
     sections = {s["id"]: s for s in config["live_sections"]}
     assert list(sections) == ["vix", "stocks", "comparisons", "futures_basis", "global_equities", "macro",
+                              "inflation", "labor", "pmi", "nowcasts", "housing", "consumer", "sentiment",
                               "financial_conditions", "japan_yields", "japan_fx", "us_jp_gaps", "commodities"]
     assert sections["stocks"]["chart_mode"] == sections["global_equities"]["chart_mode"] == "percent_change"
     assert sections["global_equities"]["symbols"] is None and sections["global_equities"]["hidden"] is False
