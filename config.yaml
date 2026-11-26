@@ -84,8 +84,17 @@ thresholds:
     falling_lookback_days: 5
 
 analytics:
-  risk_free_rate: 0.03
-  dividend_yield: 0.012
+  risk_free_rate: 0.03     # fallback when no rate_curve tenor can be loaded
+  rate_curve:              # Treasury yields by tenor, interpolated on each contract's DTE (flat beyond the ends)
+    - {dte: 91, sources: [{type: fred, id: DGS3MO}, {type: yahoo, symbol: "^IRX", range: 1mo}]}
+    - {dte: 365, sources: [{type: fred, id: DGS1}]}
+    - {dte: 730, sources: [{type: fred, id: DGS2}]}
+  dividend_yield: 0.012    # fallback when a symbol's trailing 12-month dividends cannot be fetched
+  dividend_yields: {}      # per-ticker overrides, e.g. {SPY: 0.011}; otherwise trailing 12-month dividends / price
+  margin:                  # naked short put requirement per share on top of the premium (Reg-T style approximation):
+    spot_pct: 0.20         #   max(spot_pct * spot - out-of-the-money amount, strike_pct * strike), capped at the strike
+    strike_pct: 0.10
+    leverage: {SOXL: 3, TECL: 3, KORU: 3}   # leveraged ETFs: both percentages scale with the fund's leverage
   reference_dte: 30        # expiry used for ATM IV and chain skew metrics
   skew_delta: 0.25         # chain put skew = IV(25-delta put) / IV(ATM)
   chain_skew_ratio:        # < low = LOW, < normal = NORMAL, < high = HIGH, else EXTREME
@@ -108,6 +117,12 @@ iv_backfill:
 iv_snapshot:
   enabled: true
   daily_at_et: "16:20"     # weekday refresh of the default watchlist after the US close
+  max_attempts: 3          # symbols still missing a snapshot are retried, then an alert is raised
+  retry_minutes: 15
+
+alerts:
+  # Alerts are always logged at ERROR. Email needs TRADE_PLAT_SMTP_USER / TRADE_PLAT_SMTP_PASSWORD in .env.
+  email_enabled: true
 
 macro:
   live_ttl_seconds: 55     # intraday bars / last price are re-fetched at most this often per series

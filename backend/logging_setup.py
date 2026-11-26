@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 
@@ -31,9 +32,11 @@ def setup_logging(settings: Settings) -> None:
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(formatter)
-    root.addHandler(console)
+    # A redirected stdout (nohup) would only duplicate the rotating file into a log that never rotates.
+    if sys.stdout.isatty() or os.environ.get("TRADE_PLAT_CONSOLE_LOG") == "1":
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(formatter)
+        root.addHandler(console)
 
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         lg = logging.getLogger(name)

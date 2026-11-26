@@ -1441,6 +1441,7 @@
         <span class="metric">25d put IV <b>${ref.otm_put_iv == null ? "-" : num(ref.otm_put_iv * 100, 1) + "%"}</b></span>
         <span class="metric">chain skew <b>${num(ref.skew_ratio, 3)}</b> ${badge(ref.skew_level)}</span>
         <span class="metric">IV rank <b>${ivr.value == null ? "n/a" : num(ivr.value, 0)}</b> ${ivr.level ? badge(ivr.level) : ""} <span class="muted" title="${esc(ivr.note || "")}">${ivr.source ? `(${esc(ivr.source)})` : ""}</span></span>
+        ${u.pricing ? `<span class="metric muted" title="Black-Scholes inputs. Dividend yield: ${esc(u.pricing.dividend_source)}; rate: ${esc(u.pricing.rate_source)} at ${esc(u.pricing.rate_dte)} DTE">q ${num(u.pricing.dividend_yield * 100, 2)}% / r ${num(u.pricing.risk_free_rate * 100, 2)}%</span>` : ""}
         <span class="metric muted">${u.stats?.contracts_quoted ?? u.stats?.puts_quoted} contracts quoted, ${u.stats?.after_filters} passed filters</span>
       </div>`;
     const warnings = [...(u.warnings || []), ivr.value == null ? ivr.note : null].filter(Boolean);
@@ -1451,7 +1452,7 @@
       ? `<th>Contract $</th><th>Intrinsic</th><th>Extrinsic</th><th>Extrinsic / delta</th><th>Breakeven</th><th>Theta/day</th>`
       : longVol
         ? `<th>Cost % spot</th><th>Cost / delta</th><th>Theta/day</th>`
-        : `<th>Yield %</th><th>Annualized %</th><th>Cushion %</th>`;
+        : `<th>Yield %</th><th title="Premium / strike, annualized: return on a cash-secured put">Annualized %</th><th title="Premium / margin requirement, annualized. Requirement per share = max(${num((u.pricing?.margin_spot_pct ?? 0.2) * 100, 0)}% of spot - out-of-the-money amount, ${num((u.pricing?.margin_strike_pct ?? 0.1) * 100, 0)}% of strike); your broker may ask for more.">Ann. on margin %</th><th>Cushion %</th>`;
     const rows = u.candidates.map((c) => `
       <tr>
         <td>${c.rank}</td>
@@ -1470,7 +1471,7 @@
           ? `<td>$${num(c.contract_premium, 0)}</td><td>${num(c.intrinsic_value)}</td><td>${num(c.extrinsic_value)}</td><td>${num(c.extrinsic_cost_per_delta_pct)}</td><td>${num(c.breakeven)} (${signed(c.breakeven_upside_pct, 1)}%)</td><td>${num(c.theta_per_day, 3)}</td>`
           : longVol
             ? `<td>${num(c.cost_pct_of_spot)}%</td><td>${num(c.cost_per_delta_pct)}</td><td>${num(c.theta_per_day, 3)}</td>`
-            : `<td>${num(c.premium_yield_pct)}%</td><td>${num(c.annualized_yield_pct, 1)}%</td><td>${num(c.cushion_pct, 1)}%</td>`}
+            : `<td>${num(c.premium_yield_pct)}%</td><td>${num(c.annualized_yield_pct, 1)}%</td><td>${c.annualized_margin_yield_pct == null ? "-" : num(c.annualized_margin_yield_pct, 1) + "%"}</td><td>${num(c.cushion_pct, 1)}%</td>`}
         <td>${c.open_interest}</td>
         <td>${c.volume}</td>
         <td>${num(c.spread_pct, 1)}%</td>
@@ -1555,14 +1556,20 @@
           <td>${range}</td>
           <td class="left small">${source}</td>
           <td>${num(it.skew_ratio, 3)} ${badge(it.skew_level)}</td>
-          <td class="muted small">${esc(it.snapshots)} / ${esc(String(it.updated_at || "").replace("T", " ").slice(0, 16))}</td>
+          <td class="small ${it.stale ? "error-text" : "muted"}" title="${it.stale ? `No usable snapshot for ${esc(sched.expected_market_date)}; IV rank is running on older data` : "Latest market date with a stored ATM IV"}">${esc(it.snapshots)} / ${esc(it.last_snapshot_date || "none")}${it.stale ? " (stale)" : ""}</td>
         </tr>`;
     }).join("");
+    const failure = sched.last_failure;
+    const failed = (last?.warnings || []).length ? `Last refresh had failures: ${last.warnings.join("; ")}` : "";
+    const alert = failure
+      ? `Daily snapshot for ${failure.date} is missing ${failure.symbols.map(ticker).join(", ")} after ${failure.attempts}/${sched.max_attempts} attempts${failure.final ? "" : " - retrying"}${failure.reasons.length ? `: ${failure.reasons.join("; ")}` : ""}`
+      : failed;
     $("#watchlist-results").innerHTML = `
+      ${alert ? `<div class="warnings">${esc(alert)}</div>` : ""}
       <table>
         <thead><tr>
           <th class="left">Ticker</th><th>Spot</th><th>Chg</th><th>ATM IV 30d</th><th>IV Rank</th><th>IV Pctl</th>
-          <th>Series IV</th><th>52w IV range</th><th class="left">Rank source</th><th>25d skew</th><th>Snapshots / updated</th>
+          <th>Series IV</th><th>52w IV range</th><th class="left">Rank source</th><th>25d skew</th><th>Snapshots / last good</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>

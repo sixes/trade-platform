@@ -10,6 +10,9 @@ PID_FILE="$PROJECT_DIR/data/server.pid"
 LOG_DIR="$PROJECT_DIR/logs"
 SERVER_OUT="$LOG_DIR/server.out"
 APP_LOG="$LOG_DIR/app.log"
+SERVER_OUT_MAX_BYTES=$((10 * 1024 * 1024))
+UNIT_NAME="trade-plat.service"
+UNIT_FILE="$HOME/.config/systemd/user/$UNIT_NAME"
 CHARTJS_URL="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"
 CHARTJS_FILE="$PROJECT_DIR/frontend/vendor/chart.umd.js"
 
@@ -41,16 +44,40 @@ ensure_venv() {
   [[ -x "$PYTHON" ]] || die "venv not found. Run: ./run.sh setup"
 }
 
+is_server() {
+  [[ -n "$1" && "$(readlink "/proc/$1/cwd" 2>/dev/null)" == "$PROJECT_DIR" ]] \
+    && tr '\0' ' ' <"/proc/$1/cmdline" 2>/dev/null | grep -q -- "-m backend.main"
+}
+
 server_pid() {
-  [[ -f "$PID_FILE" ]] || return 1
   local pid
-  pid="$(cat "$PID_FILE")"
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if is_server "$pid"; then
     echo "$pid"
     return 0
   fi
+  # The PID file can go stale when the server was started some other way; find the real process.
+  for pid in $(pgrep -u "$(id -u)" -f -- "-m backend.main" 2>/dev/null || true); do
+    if is_server "$pid"; then
+      echo "$pid" >"$PID_FILE"
+      echo "$pid"
+      return 0
+    fi
+  done
   rm -f "$PID_FILE"
   return 1
+}
+
+service_installed() {
+  [[ -f "$UNIT_FILE" ]] && systemctl --user is-enabled "$UNIT_NAME" >/dev/null 2>&1
+}
+
+rotate_server_out() {
+  [[ -f "$SERVER_OUT" ]] || return 0
+  if (( $(stat -c %s "$SERVER_OUT") > SERVER_OUT_MAX_BYTES )); then
+    mv -f "$SERVER_OUT" "$SERVER_OUT.1"
+    log "Rotated $SERVER_OUT to $SERVER_OUT.1"
+  fi
 }
 
 cmd_setup() {
@@ -81,6 +108,12 @@ cmd_start() {
     log "Server already running (pid $pid)"
     return 0
   fi
+  if service_installed; then
+    systemctl --user start "$UNIT_NAME"
+    log "Started via systemd ($UNIT_NAME); logs: journalctl --user -u $UNIT_NAME and $APP_LOG"
+    return 0
+  fi
+  rotate_server_out
   log "Starting server (output: $SERVER_OUT)"
   nohup "$PYTHON" -m backend.main >>"$SERVER_OUT" 2>&1 &
   echo $! >"$PID_FILE"
@@ -94,6 +127,12 @@ cmd_start() {
 }
 
 cmd_stop() {
+  if service_installed; then
+    systemctl --user stop "$UNIT_NAME"
+    rm -f "$PID_FILE"
+    log "Stopped via systemd ($UNIT_NAME)"
+    return 0
+  fi
   if pid="$(server_pid)"; then
     log "Stopping server (pid $pid)"
     kill "$pid"
@@ -122,6 +161,34 @@ cmd_status() {
     log "Server is not running"
     return 1
   fi
+}
+
+cmd_install_service() {
+  ensure_venv
+  mkdir -p "$(dirname "$UNIT_FILE")"
+  cat >"$UNIT_FILE" <<UNIT
+[Unit]
+Description=Trade Plat server
+After=network-online.target
+
+[Service]
+WorkingDirectory=$PROJECT_DIR
+ExecStart=$PYTHON -m backend.main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNIT
+  systemctl --user daemon-reload
+  if pid="$(server_pid)"; then
+    log "Stopping the nohup server (pid $pid) so systemd can take over"
+    kill "$pid"
+    for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    rm -f "$PID_FILE"
+  fi
+  systemctl --user enable --now "$UNIT_NAME"
+  log "Installed $UNIT_FILE; the server now restarts on failure and at boot"
 }
 
 cmd_logs() {
@@ -161,6 +228,7 @@ Usage: ./run.sh <command>
   dev       Run the server in the foreground with auto-reload
   test      Run the unit tests (extra args passed to pytest)
   check     Verify Longbridge credentials and data sources
+  install-service   Run the server under systemd --user (restart on failure, start at boot)
 EOF
 }
 
@@ -174,5 +242,6 @@ case "${1:-}" in
   dev) cmd_dev ;;
   test) shift; cmd_test "$@" ;;
   check) cmd_check ;;
+  install-service) cmd_install_service ;;
   *) usage; exit 1 ;;
 esac

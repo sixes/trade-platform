@@ -7,6 +7,8 @@ import uuid
 from datetime import date, datetime, timedelta
 from typing import Callable, Dict, List, Optional, Tuple
 
+from backend.alerts import Notifier
+from backend.analytics.carry import CarryModel
 from backend.analytics.indicators import classify_level, iv_rank, percentile_rank
 from backend.analytics.ivhistory import backfill_expiry_candidates, build_proxy_iv_history, strikes_covering
 from backend.analytics.regime import IVR_LEVELS, SCENARIO_BY_KEY, classify_regime, compute_market_metrics, summarize_series
@@ -216,11 +218,13 @@ class IvRankResolver:
       4. a partial snapshot history, flagged as such.
     """
 
-    def __init__(self, settings: Settings, indices: IndexHistoryProvider, db: Database, client: Optional[LongbridgeClient]):
+    def __init__(self, settings: Settings, indices: IndexHistoryProvider, db: Database, client: Optional[LongbridgeClient],
+                 carry: Optional[CarryModel] = None):
         self.settings = settings
         self.indices = indices
         self.db = db
         self.client = client
+        self.carry = carry or CarryModel(settings)
         analytics = settings.section("analytics")
         self.lookback = int(settings.get("thresholds.iv_rank.lookback_days", 252))
         self.min_partial = int(analytics.get("min_snapshots_for_iv_rank", 20))
@@ -306,9 +310,7 @@ class IvRankResolver:
                  progress: Optional[Callable[[str], None]]) -> List[Tuple[str, float]]:
         assert self.client is not None
         cfg = self.settings.section("iv_backfill")
-        analytics = self.settings.section("analytics")
-        r = float(analytics.get("risk_free_rate", 0.04))
-        q = float(analytics.get("dividend_yield", 0.0))
+        q = self.carry.dividend_yield(symbol)
         max_strikes = int(cfg.get("max_strikes", 14))
         bars = int(cfg.get("days", 270))
         attempts = max(1, int(cfg.get("max_expiry_attempts", 2)))
@@ -338,7 +340,7 @@ class IvRankResolver:
             for i, strike in enumerate(strikes):
                 report(f"option history {i + 1}/{len(strikes)} (strike {strike:g}, expiry {expiry.isoformat()})")
                 option_closes[strike] = dict(self.client.daily_closes(by_strike[strike], bars, cancel, is_option=True))
-            series = build_proxy_iv_history(closes, option_closes, expiry, r, q)
+            series = build_proxy_iv_history(closes, option_closes, expiry, self.carry.rate((expiry - today).days), q)
             log.info("IV backfill for %s: %d points from expiry %s using %d strikes", symbol, len(series), expiry, len(strikes))
             if len(series) > len(best):
                 best = series
@@ -351,12 +353,19 @@ class IvRankResolver:
 
 class ScanService:
     def __init__(self, settings: Settings, client: LongbridgeClient, market: MarketService, db: Database,
-                 iv_ranks: Optional[IvRankResolver] = None):
+                 iv_ranks: Optional[IvRankResolver] = None, carry: Optional[CarryModel] = None):
         self.settings = settings
         self.client = client
         self.market = market
         self.db = db
-        self.iv_ranks = iv_ranks or IvRankResolver(settings, market.indices, db, None)
+        self.carry = carry or CarryModel(settings)
+        self.iv_ranks = iv_ranks or IvRankResolver(settings, market.indices, db, None, self.carry)
+
+    def _margin(self, symbol: str) -> Tuple[float, float]:
+        cfg = self.settings.section("analytics").get("margin") or {}
+        leverage = {str(k).upper(): float(v) for k, v in (cfg.get("leverage") or {}).items()}
+        factor = leverage.get(ticker_of(symbol).upper(), 1.0)
+        return float(cfg.get("spot_pct", 0.20)) * factor, float(cfg.get("strike_pct", 0.10)) * factor
 
     # ------------------------------------------------------------------ shared steps
     def reference_sample(self, job: Job, symbol: str, spot: float, expiries: List[date], today: date,
@@ -364,8 +373,7 @@ class ScanService:
         """Quote a thin near-the-money sample on the ~30 DTE expiry: ATM IV, 25-delta put IV and skew."""
         analytics = self.settings.section("analytics")
         lb_cfg = self.settings.section("longbridge")
-        r = float(analytics.get("risk_free_rate", 0.04))
-        q = float(analytics.get("dividend_yield", 0.0))
+        q = self.carry.dividend_yield(symbol)
         reference_dte = int(analytics.get("reference_dte", 30))
         ref_band = lb_cfg.get("reference_strike_band", [0.85, 1.03])
         max_strikes = int(lb_cfg.get("max_strikes_per_expiry", 30))
@@ -385,7 +393,7 @@ class ScanService:
             raise LongbridgeError(f"option chain returned no puts near the money for {symbol}")
         job.update(phase=f"{symbol}: quoting reference puts", message=f"{len(pairs)} contracts", progress=(base + end) / 2)
         rows = self.client.option_quotes([sym for _, sym in pairs], cancel)
-        candidates, _ = build_candidates(rows, spot, today, r, q)
+        candidates, _ = build_candidates(rows, spot, today, self.carry.rate, q)
         reference = reference_metrics(candidates, reference_dte, float(analytics.get("skew_delta", 0.25)), analytics.get("chain_skew_ratio", {}))
         self._store_snapshot(symbol, today, spot, reference)
         job.update(progress=end)
@@ -462,8 +470,8 @@ class ScanService:
         cancel = job.cancel_event
         analytics = self.settings.section("analytics")
         lb_cfg = self.settings.section("longbridge")
-        r = float(analytics.get("risk_free_rate", 0.04))
-        q = float(analytics.get("dividend_yield", 0.0))
+        q = self.carry.dividend_yield(symbol)
+        margin = self._margin(symbol)
         fallback_band = lb_cfg.get("strike_band", [0.6, 1.0])
         max_expiries = int(lb_cfg.get("max_expiries_per_symbol", 3))
         max_strikes = int(lb_cfg.get("max_strikes_per_expiry", 30))
@@ -511,7 +519,7 @@ class ScanService:
             job.update(phase=f"{symbol}: loading option chain", message=f"expiry {expiry.isoformat()} ({k + 1}/{len(scenario_expiries)})",
                        progress=base + span * (0.22 + 0.16 * (k + 1) / len(scenario_expiries)))
             dte = (expiry - today).days
-            lo, hi = strike_band_for_deltas(spot, delta_lo, delta_hi, dte, reference.get("atm_iv"), reference.get("skew_ratio"), r, q, fallback_band, option_side)
+            lo, hi = strike_band_for_deltas(spot, delta_lo, delta_hi, dte, reference.get("atm_iv"), reference.get("skew_ratio"), self.carry.rate(dte), q, fallback_band, option_side)
             full_chain = chain(expiry)
             if target_strike is not None and strike_mode == "exact":
                 pairs = [p for p in full_chain if matches_strike(p[0], target_strike, strike_mode)]
@@ -534,7 +542,7 @@ class ScanService:
         if wanted:
             job.update(phase=f"{symbol}: fetching option quotes", message=f"{len(wanted)} contracts", progress=base + span * 0.40)
             rows = rows + self.client.option_quotes(wanted, cancel, on_batch)
-        candidates, skipped = build_candidates(rows, spot, today, r, q, option_side)
+        candidates, skipped = build_candidates(rows, spot, today, self.carry.rate, q, option_side, margin)
         if skipped.get("no_iv"):
             warnings.append(f"{skipped['no_iv']} {option_side}s had no implied volatility and were skipped")
         atm_by_expiry = atm_iv_by_expiry(candidates)
@@ -564,6 +572,8 @@ class ScanService:
             "underlying": symbol,
             "spot": spot_info,
             "reference": reference,
+            "pricing": dict(self.carry.describe(symbol, (scenario_expiries[0] - today).days),
+                            margin_spot_pct=margin[0], margin_strike_pct=margin[1]),
             "atm_iv_by_expiry": {k: round(v, 5) for k, v in atm_by_expiry.items()},
             "iv_rank": iv_rank_info,
             "expiries": [e.isoformat() for e in scenario_expiries],
@@ -619,7 +629,10 @@ class IvRefreshService:
             span = 0.98 / n
             job.update(symbol=symbol)
             try:
-                items.append(self._refresh_symbol(job, symbol, today, base, span))
+                item = self._refresh_symbol(job, symbol, today, base, span)
+                items.append(item)
+                if item.get("atm_iv") is None:
+                    warnings.append(f"{symbol}: no ATM IV could be derived from the reference expiry")
             except (ScanCancelled, AuthError):
                 raise
             except LongbridgeError as exc:
@@ -759,19 +772,30 @@ class JobManager:
 
 
 class DailySnapshotScheduler:
-    """Refreshes the default watchlist once per weekday after the US close so IV history keeps growing."""
+    """Refreshes the default watchlist each weekday after the US close, retrying symbols that failed and
+    raising an alert when a day's snapshot is still incomplete after the last attempt."""
 
-    def __init__(self, settings: Settings, jobs: JobManager, db: Database):
+    def __init__(self, settings: Settings, jobs: JobManager, db: Database, notifier: Optional[Notifier] = None):
         self.settings = settings
         self.jobs = jobs
         self.db = db
+        self.notifier = notifier or Notifier(settings)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self.last_run_date: Optional[str] = None
+        self.last_run_date: Optional[str] = None       # market date of the latest attempt
+        self.last_success_date: Optional[str] = None   # market date whose snapshot is complete
+        self.attempts = 0                              # attempts made for last_run_date
+        self.last_failure: Optional[dict] = None
+        self._retry_at = 0.0
+        self._reviewed = True
 
     @property
     def enabled(self) -> bool:
         return bool(self.settings.get("iv_snapshot.enabled", True))
+
+    @property
+    def max_attempts(self) -> int:
+        return max(1, int(self.settings.get("iv_snapshot.max_attempts", 3)))
 
     def start(self) -> None:
         if not self.enabled:
@@ -787,28 +811,90 @@ class DailySnapshotScheduler:
     def watchlist(self) -> List[str]:
         return [with_market(str(s).upper()) for s in self.settings.default_watchlist]
 
-    def due(self, now: Optional[datetime] = None) -> bool:
-        now = now or market_now()
-        if now.weekday() >= 5:
-            return False
+    def _after_run_time(self, now: datetime) -> bool:
         hh, mm = str(self.settings.get("iv_snapshot.daily_at_et", "16:20")).split(":")
-        if (now.hour, now.minute) < (int(hh), int(mm)):
-            return False
-        today = now.date().isoformat()
-        if self.last_run_date == today:
-            return False
+        return (now.hour, now.minute) >= (int(hh), int(mm))
+
+    def expected_date(self, now: Optional[datetime] = None) -> str:
+        """Market date the stored snapshots should carry by now."""
+        now = now or market_now()
+        day = now.date() if self._after_run_time(now) else now.date() - timedelta(days=1)
+        while day.weekday() >= 5:
+            day -= timedelta(days=1)
+        return day.isoformat()
+
+    def pending(self, today: str) -> List[str]:
+        """Watchlist symbols without a usable snapshot for the market date."""
         symbols = self.watchlist()
         stored = self.db.watchlist_iv(symbols)
         # Compare on the US market date: the server clock may sit in another timezone.
-        return any(not stored.get(s) or str(stored[s].get("market_date", "")) < today for s in symbols)
+        return [s for s in symbols
+                if not stored.get(s) or str(stored[s].get("market_date", "")) < today or stored[s].get("atm_iv") is None]
+
+    def due(self, now: Optional[datetime] = None) -> bool:
+        now = now or market_now()
+        if now.weekday() >= 5 or not self._after_run_time(now):
+            return False
+        today = now.date().isoformat()
+        if self.last_run_date == today and (self.attempts >= self.max_attempts or time.monotonic() < self._retry_at):
+            return False
+        return bool(self.pending(today))
+
+    def tick(self, now: Optional[datetime] = None) -> None:
+        now = now or market_now()
+        if self.jobs.is_busy():
+            return
+        today = now.date().isoformat()
+        if not self._reviewed and self.last_run_date:
+            self._review(self.last_run_date)
+        if self.due(now):
+            symbols = self.pending(today)
+            self.attempts = self.attempts + 1 if self.last_run_date == today else 1
+            self.last_run_date = today
+            self._retry_at = time.monotonic() + 60 * float(self.settings.get("iv_snapshot.retry_minutes", 15))
+            self._reviewed = False
+            self.jobs.start_iv_refresh(symbols)
+            log.info("Daily IV snapshot attempt %d/%d started for %s", self.attempts, self.max_attempts, ", ".join(symbols))
+
+    def _review(self, day: str) -> None:
+        """Judge the finished attempt by what is stored, not by whether the job was launched."""
+        self._reviewed = True
+        missing = self.pending(day)
+        if not missing:
+            self.last_success_date = day
+            self.last_failure = None
+            log.info("Daily IV snapshot for %s complete after %d attempt(s)", day, self.attempts)
+            return
+        current = self.jobs.current() or {}
+        result = self.jobs.last_iv_result() or {}
+        reasons = [current["error"]] if current.get("kind") == "iv_refresh" and current.get("error") else []
+        reasons += [w for w in result.get("warnings", []) if w.split(":")[0] in missing]
+        self.last_failure = {"date": day, "symbols": missing, "attempts": self.attempts, "reasons": reasons,
+                             "final": self.attempts >= self.max_attempts}
+        log.warning("Daily IV snapshot for %s incomplete after attempt %d/%d: %s", day, self.attempts, self.max_attempts, ", ".join(missing))
+        if self.last_failure["final"]:
+            self.notifier.send(
+                f"IV snapshot incomplete for {day}",
+                f"No usable IV snapshot for {', '.join(missing)} after {self.attempts} attempts.\n"
+                + ("\n".join(reasons) or "No error detail was recorded.")
+                + "\nIV rank history for these symbols has a gap for this date until a manual Refresh IV succeeds.",
+            )
+
+    def status(self) -> dict:
+        return {
+            "enabled": self.enabled,
+            "daily_at_et": self.settings.get("iv_snapshot.daily_at_et", "16:20"),
+            "last_run_date": self.last_run_date,
+            "last_success_date": self.last_success_date,
+            "attempts": self.attempts,
+            "max_attempts": self.max_attempts,
+            "expected_market_date": self.expected_date(),
+            "last_failure": self.last_failure,
+        }
 
     def _loop(self) -> None:
         while not self._stop.wait(60):
             try:
-                if self.due() and not self.jobs.is_busy():
-                    symbols = self.watchlist()
-                    self.jobs.start_iv_refresh(symbols)
-                    self.last_run_date = market_today().isoformat()
-                    log.info("Daily IV snapshot started for %s", ", ".join(symbols))
+                self.tick()
             except Exception as exc:
                 log.warning("Daily IV snapshot scheduler error: %s", exc)

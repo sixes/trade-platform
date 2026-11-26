@@ -149,7 +149,8 @@ def test_watchlist_endpoint_lists_default_tickers_without_suffix():
     data = client.get("/api/watchlist").json()
     assert data["symbols"] == [f"{t}.US" for t in DEFAULT_WATCHLIST]
     assert [i["ticker"] for i in data["items"]] == DEFAULT_WATCHLIST
-    assert set(data["scheduler"]) == {"enabled", "daily_at_et", "last_run_date"}
+    assert set(data["scheduler"]) == {"enabled", "daily_at_et", "last_run_date", "last_success_date", "attempts",
+                                      "max_attempts", "expected_market_date", "last_failure"}
     custom = client.get("/api/watchlist?symbols=aapl,TSLA").json()
     assert [i["ticker"] for i in custom["items"]] == ["AAPL", "TSLA"]
 

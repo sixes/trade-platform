@@ -173,3 +173,49 @@ def test_atm_iv_by_expiry_and_per_expiry_iv_ratio():
     biased = {e: 0.36 for e in per_expiry}  # pretend every expiry's ATM IV is double
     filtered = filter_candidates(cands, cfg, atm_iv=0.18, atm_by_expiry=biased)
     assert filtered and all(abs(c.iv_ratio - c.iv / 0.36) < 1e-9 for c in filtered)
+
+
+def test_missing_yield_or_spread_fails_the_filter_instead_of_passing():
+    fake = FakeLongbridge(today=TODAY)
+    cands, _ = chain_candidates(fake)
+    cfg = dict(deepcopy(SETTINGS.section("scenarios.sell_20_delta_puts")), max_spread_pct=10, min_annualized_yield_pct=0.01)
+    good, unquoted = filter_candidates(cands, cfg, atm_iv=0.18)[:2]
+    apply_depth(good, round(good.price * 0.99, 2), round(good.price * 1.01, 2))
+    apply_depth(unquoted, None, unquoted.price)  # ask only: no spread can be measured
+    assert unquoted.spread_pct is None
+    assert filter_candidates([good, unquoted], cfg, atm_iv=0.18, enforce_spread=True) == [good]
+    good.annualized_yield_pct = None
+    assert filter_candidates([good], cfg, atm_iv=0.18) == []
+
+
+def test_missing_metric_scores_worst_unless_it_applies_to_nobody():
+    assert screener._percentile_scores([None, 1.0, 2.0], True) == [0.0, 0.25, 0.75]
+    assert screener._percentile_scores([None, 3.0], False) == [0.0, 1.0]
+    assert screener._percentile_scores([None, None], True) == [0.5, 0.5]
+
+
+def test_put_yield_on_margin_uses_reg_t_style_requirement():
+    assert screener.naked_put_margin(100.0, 90.0) == pytest.approx(10.0)   # 20% spot - 10 OTM
+    assert screener.naked_put_margin(100.0, 70.0) == pytest.approx(7.0)    # 10% strike floor
+    assert screener.naked_put_margin(100.0, 90.0, 0.60, 0.30) == pytest.approx(50.0)
+    assert screener.naked_put_margin(100.0, 90.0, 2.0, 1.0) == 90.0        # never above cash-secured
+    fake = FakeLongbridge(today=TODAY)
+    cands, _ = chain_candidates(fake)
+    c = next(c for c in cands if c.strike == 450.0 and c.dte == 38)
+    assert c.margin_per_share == pytest.approx(0.20 * 500 - 50)
+    assert c.annualized_margin_yield_pct == pytest.approx(c.price / 50.0 * 100 * 365 / 38)
+    assert c.annualized_margin_yield_pct > c.annualized_yield_pct
+    rows = [row for row in fake._rows.values() if row.option_side == "call"]
+    calls, _ = build_candidates(rows, fake.spot_price, TODAY, R, Q, "call")
+    assert all(c.margin_per_share is None and c.annualized_margin_yield_pct is None for c in calls)
+
+
+def test_rate_may_vary_by_tenor():
+    fake = FakeLongbridge(today=TODAY)
+    rows = [row for row in fake._rows.values() if row.option_side == "put" and row.strike == 450.0]
+    flat, _ = build_candidates(rows, fake.spot_price, TODAY, R, Q)
+    seen = []
+    curved, _ = build_candidates(rows, fake.spot_price, TODAY, lambda dte: seen.append(dte) or R + dte / 10000.0, Q)
+    assert sorted(seen) == sorted(c.dte for c in flat)
+    long_flat, long_curved = max(flat, key=lambda c: c.dte), max(curved, key=lambda c: c.dte)
+    assert abs(long_curved.delta) < abs(long_flat.delta)  # a higher rate lifts the forward, so the put delta shrinks

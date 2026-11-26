@@ -74,6 +74,18 @@ class Database:
             ).fetchall()
         return [(r["date"], float(r["atm_iv"])) for r in reversed(rows)]
 
+    def last_snapshot_dates(self, underlyings: List[str]) -> dict:
+        """Latest date with a stored ATM IV per underlying."""
+        if not underlyings:
+            return {}
+        marks = ",".join("?" for _ in underlyings)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT underlying, MAX(date) AS day FROM iv_snapshots WHERE atm_iv IS NOT NULL AND underlying IN ({marks}) GROUP BY underlying",
+                tuple(underlyings),
+            ).fetchall()
+        return {r["underlying"]: r["day"] for r in rows}
+
     def replace_iv_history(self, underlying: str, source: str, points: List[Tuple[str, float]]) -> None:
         now = datetime.now().isoformat(timespec="seconds")
         with self._lock:

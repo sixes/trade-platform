@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import date
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from backend.analytics.greeks import call_delta, call_theta_per_day, put_delta, put_theta_per_day, strike_for_call_delta, strike_for_put_delta
 from backend.analytics.indicators import classify_level
@@ -76,6 +76,9 @@ class OptionCandidate:
     iv_ratio: Optional[float] = None
     premium_yield_pct: Optional[float] = None
     annualized_yield_pct: Optional[float] = None
+    margin_per_share: Optional[float] = None
+    margin_yield_pct: Optional[float] = None
+    annualized_margin_yield_pct: Optional[float] = None
     breakeven: Optional[float] = None
     cushion_pct: Optional[float] = None
     cost_pct_of_spot: Optional[float] = None
@@ -95,8 +98,14 @@ class OptionCandidate:
         return asdict(self)
 
 
-def build_candidates(rows: Sequence[OptionQuoteRow], spot: float, today: date, r: float, q: float,
-                     option_side: str = "put") -> Tuple[List[OptionCandidate], dict]:
+def naked_put_margin(spot: float, strike: float, spot_pct: float = 0.20, strike_pct: float = 0.10) -> float:
+    """Reg-T style requirement per share on top of the premium received, capped at the cash-secured amount."""
+    return min(max(spot_pct * spot - max(spot - strike, 0.0), strike_pct * strike), strike)
+
+
+def build_candidates(rows: Sequence[OptionQuoteRow], spot: float, today: date, r: Union[float, Callable[[int], float]], q: float,
+                     option_side: str = "put", margin: Tuple[float, float] = (0.20, 0.10)) -> Tuple[List[OptionCandidate], dict]:
+    """r is a flat rate or a callable giving the rate for a DTE; margin is (spot_pct, strike_pct) for short puts."""
     out: List[OptionCandidate] = []
     skipped = {"expired": 0, "no_iv": 0, "no_delta": 0, "bad_status": 0, "wrong_side": 0, "invalid_side": 0}
     for row in rows:
@@ -120,7 +129,8 @@ def build_candidates(rows: Sequence[OptionQuoteRow], spot: float, today: date, r
             skipped["no_iv"] += 1
             continue
         t = dte / 365.0
-        delta = call_delta(spot, row.strike, t, row.iv, r, q) if side == "call" else put_delta(spot, row.strike, t, row.iv, r, q)
+        rate = r(dte) if callable(r) else r
+        delta = call_delta(spot, row.strike, t, row.iv, rate, q) if side == "call" else put_delta(spot, row.strike, t, row.iv, rate, q)
         if delta is None:
             skipped["no_delta"] += 1
             continue
@@ -136,11 +146,13 @@ def build_candidates(rows: Sequence[OptionQuoteRow], spot: float, today: date, r
             last=row.last if row.last and row.last > 0 else None,
             iv=row.iv,
             delta=delta,
-            theta_per_day=call_theta_per_day(spot, row.strike, t, row.iv, r, q) if side == "call" else put_theta_per_day(spot, row.strike, t, row.iv, r, q),
+            theta_per_day=call_theta_per_day(spot, row.strike, t, row.iv, rate, q) if side == "call" else put_theta_per_day(spot, row.strike, t, row.iv, rate, q),
             open_interest=row.open_interest,
             volume=row.volume,
             contract_multiplier=row.contract_multiplier,
         )
+        if side == "put":
+            cand.margin_per_share = naked_put_margin(spot, row.strike, *margin)
         cand.price = cand.last
         recompute(cand)
         out.append(cand)
@@ -151,6 +163,7 @@ def recompute(c: OptionCandidate) -> None:
     price = c.price
     if price is None or price <= 0:
         c.premium_yield_pct = c.annualized_yield_pct = c.breakeven = c.cushion_pct = None
+        c.margin_yield_pct = c.annualized_margin_yield_pct = None
         c.cost_pct_of_spot = c.cost_per_delta_pct = None
         c.intrinsic_value = c.extrinsic_value = c.extrinsic_cost_per_delta_pct = None
         c.contract_premium = c.breakeven_upside_pct = None
@@ -169,6 +182,9 @@ def recompute(c: OptionCandidate) -> None:
     else:
         c.premium_yield_pct = price / c.strike * 100.0
         c.annualized_yield_pct = c.premium_yield_pct * 365.0 / max(c.dte, 1)
+        if c.margin_per_share:
+            c.margin_yield_pct = price / c.margin_per_share * 100.0
+            c.annualized_margin_yield_pct = c.margin_yield_pct * 365.0 / max(c.dte, 1)
         c.breakeven = c.strike - price
         c.cushion_pct = (c.spot - c.breakeven) / c.spot * 100.0
         c.moneyness = "ITM" if c.strike > c.spot * 1.01 else "OTM" if c.strike < c.spot * 0.99 else "ATM"
@@ -288,9 +304,11 @@ def filter_candidates(cands: Sequence[OptionCandidate], scenario_cfg: dict, atm_
             continue
         if c.price is None or c.price <= 0:
             continue
-        if min_yield is not None and c.annualized_yield_pct is not None and c.annualized_yield_pct < float(min_yield):
+        # Missing data fails a filter: an unknown yield or spread is not evidence that it is acceptable.
+        if min_yield is not None and c.option_side == "put" and (
+                c.annualized_yield_pct is None or c.annualized_yield_pct < float(min_yield)):
             continue
-        if enforce_spread and max_spread is not None and c.spread_pct is not None and c.spread_pct > float(max_spread):
+        if enforce_spread and max_spread is not None and (c.spread_pct is None or c.spread_pct > float(max_spread)):
             continue
         base_iv = atm_by_expiry.get(c.expiry) or atm_iv
         c.iv_ratio = (c.iv / base_iv) if base_iv else None
@@ -312,15 +330,16 @@ SCORE_WEIGHTS: Dict[str, List[Tuple[str, bool, float]]] = {
 
 
 def _percentile_scores(values: List[Optional[float]], higher_is_better: bool) -> List[float]:
+    """A metric nobody has is neutral (it does not apply); a metric one candidate lacks scores worst for it."""
     known = sorted(v for v in values if v is not None)
     if not known:
         return [0.5] * len(values)
     if len(known) == 1:
-        return [0.5 if v is None else 1.0 for v in values]
+        return [0.0 if v is None else 1.0 for v in values]
     out = []
     for v in values:
         if v is None:
-            out.append(0.5)
+            out.append(0.0)
             continue
         below = sum(1 for k in known if k < v)
         equal = sum(1 for k in known if k == v)

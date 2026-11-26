@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
+from backend.analytics.carry import CarryModel, fetch_trailing_dividend_yield
 from backend.analytics.regime import SCENARIO_BY_KEY, SCENARIOS
 from backend.config import PROJECT_ROOT, load_settings, settings
 from backend.jobs import DailySnapshotScheduler, IvRankResolver, IvRefreshService, JobManager, MarketService, ScanService, ticker_of
@@ -43,8 +44,9 @@ market = MarketService(settings, indices, fear_greed, live_vix=lambda: macro.liv
 kalshi = KalshiService(settings)
 china_etfs = ChinaEtfService()
 china_futures = ChinaFuturesService(ttl_minutes=cache_ttl)
-iv_ranks = IvRankResolver(settings, indices, db, client)
-scanner = ScanService(settings, client, market, db, iv_ranks)
+carry = CarryModel(settings, indices, fetch_trailing_dividend_yield)
+iv_ranks = IvRankResolver(settings, indices, db, client, carry)
+scanner = ScanService(settings, client, market, db, iv_ranks, carry)
 jobs = JobManager(scanner, IvRefreshService(settings, client, scanner, iv_ranks, db), db)
 scheduler = DailySnapshotScheduler(settings, jobs, db)
 
@@ -310,6 +312,8 @@ def api_china_futures(range: str = "1y"):
 def api_watchlist(symbols: Optional[str] = None):
     wanted = normalize_symbols(symbols.split(",") if symbols else settings.default_watchlist)
     stored = db.watchlist_iv(wanted)
+    status = scheduler.status()
+    last_good = db.last_snapshot_dates(wanted)
     items = []
     for sym in wanted:
         entry = stored.get(sym)
@@ -317,15 +321,12 @@ def api_watchlist(symbols: Optional[str] = None):
             items.append({"underlying": sym, "ticker": ticker_of(sym), "missing": True,
                           "snapshots": len(db.atm_iv_history(sym, 252))})
         else:
-            items.append(entry)
+            items.append(dict(entry, last_snapshot_date=last_good.get(sym),
+                              stale=(last_good.get(sym) or "") < status["expected_market_date"]))
     return {
         "symbols": wanted,
         "items": items,
-        "scheduler": {
-            "enabled": scheduler.enabled,
-            "daily_at_et": settings.get("iv_snapshot.daily_at_et", "16:20"),
-            "last_run_date": scheduler.last_run_date,
-        },
+        "scheduler": status,
         "last_refresh": jobs.last_iv_result(),
     }
 

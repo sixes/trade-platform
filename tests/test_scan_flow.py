@@ -305,9 +305,65 @@ def test_daily_scheduler_due_logic(db):
     assert scheduler.due(datetime(2026, 9, 23, 15, 0)) is False  # before the configured time
     assert scheduler.due(datetime(2026, 9, 26, 16, 30)) is False  # Saturday
     for sym in scheduler.watchlist():
-        db.save_watchlist_iv(sym, {"market_date": "2026-09-23"})
+        db.save_watchlist_iv(sym, {"market_date": "2026-09-23", "atm_iv": 0.2})
     assert scheduler.due(weekday_after_close) is False  # already refreshed for this market date
     assert scheduler.due(datetime(2026, 9, 24, 16, 30)) is True
+    db.save_watchlist_iv(scheduler.watchlist()[0], {"market_date": "2026-09-23", "atm_iv": None})
+    assert scheduler.due(weekday_after_close) is True  # a refresh that stored no IV is not a snapshot
+
+
+class StubJobs:
+    def __init__(self, db, succeed_on):
+        self.db, self.succeed_on, self.started = db, succeed_on, []
+
+    def is_busy(self):
+        return False
+
+    def current(self):
+        return None
+
+    def last_iv_result(self):
+        return {"warnings": [f"{s}: boom" for s in self.started[-1]]} if self.started else None
+
+    def start_iv_refresh(self, symbols):
+        self.started.append(list(symbols))
+        if len(self.started) >= self.succeed_on:
+            for sym in symbols:
+                self.db.save_watchlist_iv(sym, {"market_date": "2026-09-23", "atm_iv": 0.2})
+
+
+def scheduler_with(db, succeed_on):
+    jobs, notifier = StubJobs(db, succeed_on), Mock()
+    scheduler = DailySnapshotScheduler(SETTINGS, jobs, db, notifier)
+    for sym in scheduler.watchlist()[1:]:
+        db.save_watchlist_iv(sym, {"market_date": "2026-09-23", "atm_iv": 0.2})
+    return scheduler, jobs, notifier
+
+
+def test_daily_scheduler_retries_only_failed_symbols_until_stored(db, monkeypatch):
+    scheduler, jobs, notifier = scheduler_with(db, succeed_on=2)
+    now, missing = datetime(2026, 9, 23, 16, 30), scheduler.watchlist()[0]
+    scheduler.tick(now)
+    assert jobs.started == [[missing]] and scheduler.last_success_date is None
+    scheduler.tick(now)  # inside the retry delay: reviewed, not relaunched
+    assert len(jobs.started) == 1 and scheduler.last_failure["symbols"] == [missing]
+    assert scheduler.last_failure["final"] is False and scheduler.last_failure["reasons"] == [f"{missing}: boom"]
+    monkeypatch.setattr(scheduler, "_retry_at", 0.0)
+    scheduler.tick(now)
+    scheduler.tick(now)
+    assert len(jobs.started) == 2 and scheduler.last_success_date == "2026-09-23"
+    assert scheduler.last_failure is None and not notifier.send.called
+
+
+def test_daily_scheduler_alerts_once_after_last_attempt(db, monkeypatch):
+    scheduler, jobs, notifier = scheduler_with(db, succeed_on=99)
+    now = datetime(2026, 9, 23, 16, 30)
+    for _ in range(scheduler.max_attempts + 3):
+        monkeypatch.setattr(scheduler, "_retry_at", 0.0)
+        scheduler.tick(now)
+    assert len(jobs.started) == scheduler.max_attempts
+    assert notifier.send.call_count == 1 and scheduler.watchlist()[0] in notifier.send.call_args[0][1]
+    assert scheduler.last_failure["final"] is True and scheduler.last_success_date is None
 
 
 def fast_client(**overrides):

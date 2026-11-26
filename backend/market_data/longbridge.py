@@ -49,6 +49,13 @@ def _f(value) -> Optional[float]:
         return None
 
 
+def _sdk_stamp(value):
+    # The SDK builds naive datetimes from an epoch in this process's local zone; attach that zone at the source.
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.astimezone()
+    return value
+
+
 def normalize_iv(value) -> Optional[float]:
     iv = _f(value)
     if iv is None or iv <= 0:
@@ -275,7 +282,7 @@ class LongbridgeClient:
             "prev_close": prev_close,
             "change_pct": ((last / prev_close - 1) * 100) if last and prev_close else None,
             "trade_status": str(getattr(q, "trade_status", "")),
-            "timestamp": q.timestamp.isoformat() if hasattr(q.timestamp, "isoformat") else str(q.timestamp),
+            "timestamp": _sdk_stamp(q.timestamp).isoformat() if hasattr(q.timestamp, "isoformat") else str(q.timestamp),
         }
 
     def expiry_dates(self, symbol: str, cancel: Optional[threading.Event] = None) -> List[date]:
@@ -380,7 +387,7 @@ class LongbridgeClient:
 
     def intraday_bars(self, symbol: str, period_name: str = "Min_5", count: int = 160,
                       cancel: Optional[threading.Event] = None) -> List[Tuple[datetime, float]]:
-        """(timestamp, close) regular-session minute bars, ascending. Timestamps are as returned by the SDK (server-local)."""
+        """(timezone-aware timestamp, close) regular-session minute bars, ascending."""
         from longport import openapi as lo
 
         ctx = self._context()
@@ -394,6 +401,6 @@ class LongbridgeClient:
             session = str(getattr(bar, "trade_session", "") or "")
             if session and "Intraday" not in session:
                 continue
-            out.append((bar.timestamp, close))
+            out.append((_sdk_stamp(bar.timestamp), close))
         out.sort(key=lambda p: p[0])
         return out

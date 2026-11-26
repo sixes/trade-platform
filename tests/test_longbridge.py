@@ -112,3 +112,16 @@ def test_option_quotes_reject_contradictory_identity_before_float_rounding(overr
     client = quote_client([quote])
     with pytest.raises(LongbridgeError, match="(option quote identity mismatch|invalid option identity)"):
         client.option_quotes([quote.symbol])
+
+
+def test_sdk_naive_timestamps_gain_the_process_local_zone():
+    from datetime import datetime, timezone
+
+    from backend.market_data.longbridge import _sdk_stamp
+
+    naive = datetime(2026, 11, 24, 5, 0)
+    aware = _sdk_stamp(naive)
+    assert aware.tzinfo is not None and aware.replace(tzinfo=None) == naive
+    assert aware.timestamp() == naive.timestamp()  # same instant the SDK meant
+    already = datetime(2026, 11, 24, 5, 0, tzinfo=timezone.utc)
+    assert _sdk_stamp(already) is already
